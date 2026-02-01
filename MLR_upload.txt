@@ -19,7 +19,7 @@ Y_column = ''
 
 if not set(X_columns + [Y_column]).issubset(data.columns):
     missing_cols = set(X_columns + [Y_column]) - set(data.columns)
-    raise ValueError(f"❌ Missing columns: {missing_cols}")
+    raise ValueError(f" Missing columns: {missing_cols}")
 
 X = data[X_columns]
 Y = data[Y_column]
@@ -60,12 +60,12 @@ coefficients = pd.DataFrame({
 
 coefficients_output_path = os.path.join(output_dir, 'MLR_Coefficients.csv')
 coefficients.to_csv(coefficients_output_path, index=False)
-print(f"✅ Coefficients and p-values saved to: {coefficients_output_path}")
+print(f"Coefficients and p-values saved to: {coefficients_output_path}")
 
 p_values_df = coefficients[['Variable', 'P-Value']]
 p_values_output_path = os.path.join(output_dir, 'Significance_Values.csv')
 p_values_df.to_csv(p_values_output_path, index=False)
-print(f"✅ Significance values (p-values) saved to: {p_values_output_path}")
+print(f"Significance values (p-values) saved to: {p_values_output_path}")
 
 figsize_main = (12, 8)
 figsize_bw = (12, 8)
@@ -122,16 +122,16 @@ coefs = model_sm.params[1:]
 # Construct regression equation
 equation_terms = [f"({coef:.6f} * {var})" for coef, var in zip(coefs, X_train_sm.columns[1:])]
 regression_equation = f"Y = {intercept:.6f} + " + " + ".join(equation_terms)
-print("\n📌 **Regression Equation:**")
+print("\n**Regression Equation:**")
 print(regression_equation)
 positive_sensitivity = coefs[coefs > 0].sort_values(ascending=False)
 negative_sensitivity = coefs[coefs < 0].sort_values()
 
-print("\n✅ Positive Sensitivity Variables (Higher values increase Hydrogen Abs. Time):")
+print("\nPositive Sensitivity Variables (Higher values increase Hydrogen Abs. Time):")
 for var, coef in positive_sensitivity.items():
     print(f"  {var}: {coef:.6f}")
 
-print("\n❌ Negative Sensitivity Variables (Higher values decrease Hydrogen Abs. Time):")
+print("\n Negative Sensitivity Variables (Higher values decrease Hydrogen Abs. Time):")
 for var, coef in negative_sensitivity.items():
     print(f"  {var}: {coef:.6f}")
 
@@ -154,25 +154,26 @@ with open(os.path.join(output_dir, "regression_equation.txt"), "w") as f:
     f.write("\n\nWhere Y is the predicted")
     f.write("\n\nNote: All independent variables are standardized (z-scores)")
 
-print(f"\n📂 Files saved in {output_dir}:")
+print(f"\n Files saved in {output_dir}:")
 print("   - regression_equation.txt")
 print("   - positive_sensitivity.csv")
 print("   - negative_sensitivity.csv")
 
 # Print key metrics
-print("\n--- 📊 Regression Results ---")
-print(f"✅ Training Set: R² = {r2_train:.2f}%, MSE = {mse_train:.6f}, RMSE = {rmse_train:.6f}, MAE = {mae_train:.6f}")
-print(f"✅ Test Set: R² = {r2_test:.2f}%, MSE = {mse_test:.6f}, RMSE = {rmse_test:.6f}, MAE = {mae_test:.6f}")
-print(f"✅ Overall: R² = {r2_full:.2f}%, MSE = {mse_full:.6f}, RMSE = {rmse_full:.6f}, MAE = {mae_full:.6f}")
+print("\n--- Regression Results ---")
+print(f" Training Set: R² = {r2_train:.2f}%, MSE = {mse_train:.6f}, RMSE = {rmse_train:.6f}, MAE = {mae_train:.6f}")
+print(f" Test Set: R² = {r2_test:.2f}%, MSE = {mse_test:.6f}, RMSE = {rmse_test:.6f}, MAE = {mae_test:.6f}")
+print(f" Overall: R² = {r2_full:.2f}%, MSE = {mse_full:.6f}, RMSE = {rmse_full:.6f}, MAE = {mae_full:.6f}")
 
 # Print coefficients with p-values
-print("\n--- 📌 Coefficients and P-Values (Training Model) ---")
+print("\n---  Coefficients and P-Values (Training Model) ---")
 print(coefficients.to_string(index=False))
 
 # Determine model quality based on test R²
 if r2_test > 75:
-    print("\n\033[1;32m✅ The model has a good fit on the test set.\033[0m")  # Green text for good fit
+    print("\n\033[1;32m The model has a good fit on the test set.\033[0m")  # Green text for good fit
 elif r2_test > 50:
-    print("\n\033[1;33m⚠️ The model has a moderate fit on the test set.\033[0m")  # Yellow for moderate fit
+    print("\n\033[1;33m The model has a moderate fit on the test set.\033[0m")  # Yellow for moderate fit
 else:
-    print("\n\033[1;31m❌ The model has a poor fit on the test set. Check the regression equation.\033[0m")  # Red for poor fit
+    print("\n\033[1;31m The model has a poor fit on the test set. Check the regression equation.\033[0m")  # Red for poor fit
+
