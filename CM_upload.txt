@@ -17,16 +17,10 @@ plt.rcParams['xtick.labelsize'] = 14  # Increased from 12
 plt.rcParams['ytick.labelsize'] = 14  # Increased from 12
 plt.rcParams['legend.fontsize'] = 14  # Increased from 12
 plt.rcParams['axes.linewidth'] = 3     # Thicker axis lines
-
-# Create output directory
 output_dir = ""
 os.makedirs(output_dir, exist_ok=True)
-
-# Load dataset
 file_path = ""
 dataset = pd.read_csv(file_path)
-
-# Input features
 input_columns = [
  
 ]
@@ -48,8 +42,6 @@ def compute_p_values(data):
 # Compute correlation and p-values
 corr_matrix = dataset[input_columns].corr()
 p_value_matrix = compute_p_values(dataset[input_columns])
-
-
 def create_diverging_colormap():
     """Create a colorblind-friendly diverging colormap (blue to red)"""
     colors = ["#08306b", "#08519c", "#2171b5", "#4292c6", 
@@ -302,4 +294,5 @@ print("  • Bold text throughout")
 print("  • Larger font sizes")
 print("  • Thicker axis lines")
 print("="*70)
+
 plt.show()
