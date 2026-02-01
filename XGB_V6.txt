@@ -1,3 +1,10 @@
+"""
+XGBoost and Sobol Sensitivity Analysis
+Authors: Arindam Roy & Shubhabrata Datta
+Affiliation: Department of Mechanical Engineering, SRM Institute of Science and Technology, India
+Contact: ar4745@srmist.edu.in / royarindam160@gmail.com
+"""
+
 import os
 import pickle
 import numpy as np
@@ -261,3 +268,4 @@ plt.savefig(os.path.join(save_path, "Signed_Sobol_ST.png"), dpi=PLOT_PARAMS['dpi
 plt.show()
 
 print(f"\n✅ All analysis completed. Model and results saved to: {save_path}")
+
