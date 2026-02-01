@@ -1,3 +1,9 @@
+"""
+Multiple Linear Regression Analysis
+Authors: Arindam Roy & Shubhabrata Datta
+Affiliation: Department of Mechanical Engineering, SRM Institute of Science and Technology, India
+Contact: ar4745@srmist.edu.in / royarindam160@gmail.com
+"""
 import os
 import pandas as pd
 import numpy as np
@@ -176,4 +182,5 @@ elif r2_test > 50:
     print("\n\033[1;33m The model has a moderate fit on the test set.\033[0m")  # Yellow for moderate fit
 else:
     print("\n\033[1;31m The model has a poor fit on the test set. Check the regression equation.\033[0m")  # Red for poor fit
+
 
