@@ -1,0 +1,299 @@
+import os
+import pickle
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from xgboost import XGBRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
+from sklearn.preprocessing import StandardScaler, RobustScaler
+from SALib.sample import saltelli
+from SALib.analyze import sobol
+from scipy.stats import pearsonr
+
+# === Plot customization parameters ===
+# Set these values to adjust the appearance of all plots
+PLOT_PARAMS = {
+    'title_size': 20,
+    'label_size': 18,
+    'tick_size': 18,
+    'legend_size': 18,
+    'line_width': 8,
+    'marker_size': 150,
+    'dpi': 600,
+    'figure_size': (8, 6)
+}
+
+# Apply global settings
+plt.rcParams['font.size'] = PLOT_PARAMS['tick_size']
+plt.rcParams['axes.titlesize'] = PLOT_PARAMS['title_size']
+plt.rcParams['axes.labelsize'] = PLOT_PARAMS['label_size']
+plt.rcParams['xtick.labelsize'] = PLOT_PARAMS['tick_size']
+plt.rcParams['ytick.labelsize'] = PLOT_PARAMS['tick_size']
+plt.rcParams['legend.fontsize'] = PLOT_PARAMS['legend_size']
+plt.rcParams['lines.linewidth'] = PLOT_PARAMS['line_width']
+sns.set_style("whitegrid")
+
+# === Load dataset ===
+file_path = 'C:/Users/admin/Downloads/FINAL DATA/Dataset_4.csv'
+
+try:
+    data = pd.read_csv(file_path)
+    print(f"✅ Dataset loaded successfully with {data.shape[0]} rows and {data.shape[1]} columns")
+except FileNotFoundError:
+    print(f"Error: The file at {file_path} was not found.")
+    raise SystemExit
+
+# === Set save path ===
+save_path = "C:/Users/admin/Downloads/XGB/XGB_4"
+os.makedirs(save_path, exist_ok=True)
+
+# === Define input and target ===
+X = data[['Ni', 'Si', 'Y', 'La', 'Ce', 'Pr', 'Sm', 'Milling Time', 'Des. Pressure', 'Des. Temperature']]
+Y = data[['Hydrogen Des. Weight (%)']]  # note: trailing space kept to match column name
+
+print(f"Input features: {X.columns.tolist()}")
+print(f"Target variable: {Y.columns.tolist()}")
+
+# === Create and fit scalers - Using RobustScaler for better handling of potential outliers ===
+scaler_X = RobustScaler()
+scaler_Y = RobustScaler()
+
+X_scaled = scaler_X.fit_transform(X)
+Y_scaled = scaler_Y.fit_transform(Y)
+
+# === Split into training and testing ===
+X_train, X_test, Y_train, Y_test = train_test_split(
+    X_scaled, Y_scaled,
+    test_size=0.30,   # 30% test, 70% train
+    random_state=7   # reproducibility
+)
+
+# === Train XGBoost Regressor (optimized for small datasets) ===
+model = XGBRegressor(
+    objective='reg:squarederror',
+    n_estimators=500,           # Reduced for small dataset to prevent overfitting
+    learning_rate=0.1,          # Moderate learning rate
+    max_depth=8,                # Shallower trees for small datasets
+    min_child_weight=2,         # Higher value to prevent overfitting
+    subsample=0.8,              # Subsample ratio
+    colsample_bytree=0.8,       # Feature sampling
+    gamma=0.1,                  # Regularization
+    reg_alpha=0.1,              # L1 regularization
+    reg_lambda=1.0,             # L2 regularization
+    random_state=42,            # Reproducibility
+    n_jobs=-1                   # Use all cores
+)
+
+# Fit model (ensure y is 1-D)
+print("Training XGBoost model...")
+model.fit(X_train, Y_train.ravel())
+
+# === Save the model and scalers for multi-objective optimization ===
+model_data = {
+    'model': model,
+    'scaler_X': scaler_X,
+    'scaler_Y': scaler_Y,
+    'feature_names': X.columns.tolist(),
+    'target_name': Y.columns.tolist()[0]
+}
+
+with open(os.path.join(save_path, 'xgb_model_for_optimization.pkl'), 'wb') as f:
+    pickle.dump(model_data, f)
+
+print(f"Model saved to {os.path.join(save_path, 'xgb_model_for_optimization.pkl')}")
+
+# === Save X and Y scalers as separate pickle files ===
+with open(os.path.join(save_path, 'scaler_X.pkl'), 'wb') as f:
+    pickle.dump(scaler_X, f)
+    
+with open(os.path.join(save_path, 'scaler_Y.pkl'), 'wb') as f:
+    pickle.dump(scaler_Y, f)
+
+print(f"X scaler saved to {os.path.join(save_path, 'scaler_X.pkl')}")
+print(f"Y scaler saved to {os.path.join(save_path, 'scaler_Y.pkl')}")
+
+# === Predictions ===
+Y_train_pred = model.predict(X_train)
+Y_test_pred  = model.predict(X_test)
+Y_all_pred   = model.predict(X_scaled)
+
+# Inverse transform predictions to original scale
+Y_train_pred_orig = scaler_Y.inverse_transform(Y_train_pred.reshape(-1, 1))
+Y_test_pred_orig  = scaler_Y.inverse_transform(Y_test_pred.reshape(-1, 1))
+Y_all_pred_orig   = scaler_Y.inverse_transform(Y_all_pred.reshape(-1, 1))
+
+Y_train_orig = scaler_Y.inverse_transform(Y_train)
+Y_test_orig  = scaler_Y.inverse_transform(Y_test)
+Y_orig       = scaler_Y.inverse_transform(Y_scaled)
+
+# === Evaluation Function ===
+def print_metrics(y_true, y_pred, label="Set"):
+    r2   = r2_score(y_true, y_pred)
+    mae  = mean_absolute_error(y_true, y_pred)
+    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+    print(f"\n📊 {label} Metrics:")
+    print(f"R²: {r2*100:.2f}%")
+    print(f"MAE: {mae:.4f}")
+    print(f"RMSE: {rmse:.4f}")
+    return r2, mae, rmse
+
+# === Print Metrics ===
+r2_train, mae_train, rmse_train = print_metrics(Y_train_orig, Y_train_pred_orig, "Training")
+r2_test,  mae_test,  rmse_test  = print_metrics(Y_test_orig,  Y_test_pred_orig,  "Testing")
+r2_all,   mae_all,   rmse_all   = print_metrics(Y_orig,       Y_all_pred_orig,   "Overall (All Data)")
+
+# === Plot: Test Set Predictions (Color) ===
+plt.figure(figsize=PLOT_PARAMS['figure_size'])
+plt.scatter(Y_test_orig, Y_test_pred_orig, s=PLOT_PARAMS['marker_size'], 
+            edgecolors='k', alpha=0.7, color='steelblue')
+min_val = float(min(Y_test_orig.min(), Y_test_pred_orig.min()))
+max_val = float(max(Y_test_orig.max(), Y_test_pred_orig.max()))
+plt.plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=PLOT_PARAMS['line_width'], label='Ideal Fit')
+plt.xlabel("Actual Hydrogen Desorption Weight", fontsize=PLOT_PARAMS['label_size'])
+plt.ylabel("Predicted Hydrogen Desorption Weight", fontsize=PLOT_PARAMS['label_size'])
+plt.title("Actual vs Predicted (Test Data)", fontsize=PLOT_PARAMS['title_size'])
+plt.grid(False)  # No grid lines
+plt.legend(fontsize=PLOT_PARAMS['legend_size'])
+plt.tight_layout()
+plt.savefig(os.path.join(save_path, "Test_Predictions.png"), dpi=PLOT_PARAMS['dpi'])
+plt.show()
+
+# === Plot: All Data Predictions (Color) ===
+plt.figure(figsize=PLOT_PARAMS['figure_size'])
+plt.scatter(Y_orig, Y_all_pred_orig, s=PLOT_PARAMS['marker_size'], 
+            edgecolors='k', alpha=0.6, color='steelblue')
+min_val = float(min(Y_orig.min(), Y_all_pred_orig.min()))
+max_val = float(max(Y_orig.max(), Y_all_pred_orig.max()))
+plt.plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=PLOT_PARAMS['line_width'], label='Ideal Fit')
+plt.xlabel("Actual Hydrogen Desorption Weight", fontsize=PLOT_PARAMS['label_size'])
+plt.ylabel("Predicted Hydrogen Desorption Weight", fontsize=PLOT_PARAMS['label_size'])
+plt.title("Actual vs Predicted Hydrogen Sorption", fontsize=PLOT_PARAMS['title_size'])
+plt.grid(False)  # No grid lines
+plt.legend(fontsize=PLOT_PARAMS['legend_size'])
+plt.tight_layout()
+plt.savefig(os.path.join(save_path, "All_Predictions.png"), dpi=PLOT_PARAMS['dpi'])
+plt.show()
+
+# === Feature Importance Plot in Original Order (Color) ===
+importances = pd.DataFrame({
+    'Feature': X.columns,
+    'Importance': model.feature_importances_
+})
+importances['Original Order'] = range(len(importances))
+importances = importances.sort_values(by='Original Order')
+
+plt.figure(figsize=(8, 6))
+sns.barplot(x='Importance', y='Feature', data=importances, palette='viridis')
+plt.title('Feature Importance (XGBoost) in Original Order', fontsize=PLOT_PARAMS['title_size'])
+plt.xlabel('Importance', fontsize=PLOT_PARAMS['label_size'])
+plt.ylabel('Features', fontsize=PLOT_PARAMS['label_size'])
+plt.grid(False)  # No grid lines
+plt.tight_layout()
+plt.savefig(os.path.join(save_path, "Feature_Importance.png"), dpi=PLOT_PARAMS['dpi'])
+plt.show()
+
+# === Sobol Sensitivity Analysis ===
+print("\n🔍 Performing Sobol Sensitivity Analysis...")
+
+# Flexible + safe bounds
+final_bounds = []
+for col in X.columns:
+    lb, ub = float(X[col].min()), float(X[col].max())
+    # Fix if min == max
+    if lb == ub:
+        if lb == 0:
+            lb, ub = -1e-6, 1e-6
+        else:
+            delta = abs(lb) * 0.01 if lb != 0 else 1e-6
+            lb, ub = lb - delta, ub + delta
+    # Final check
+    if not np.isfinite(lb) or not np.isfinite(ub) or lb >= ub:
+        raise ValueError(f"Invalid bounds for {col}: [{lb}, {ub}]")
+    final_bounds.append([lb, ub])
+
+# Define the problem for Sobol analysis
+problem = {
+    'num_vars': X.shape[1],
+    'names': X.columns.tolist(),
+    'bounds': final_bounds
+}
+
+# Sobol sampling - using fewer samples for small dataset
+param_values = saltelli.sample(problem, 512, calc_second_order=True)
+
+# Predict with model (scale inputs first)
+param_values_scaled = scaler_X.transform(param_values)
+Y_sobol_pred_scaled = model.predict(param_values_scaled)
+Y_sobol_pred = scaler_Y.inverse_transform(Y_sobol_pred_scaled.reshape(-1, 1)).flatten()
+
+# Sobol Analysis (guard against NaNs in indices)
+sobol_indices = sobol.analyze(problem, Y_sobol_pred, print_to_console=False)
+S1 = np.nan_to_num(sobol_indices['S1'], nan=0.0)
+ST = np.nan_to_num(sobol_indices['ST'], nan=0.0)
+S1_conf = np.nan_to_num(sobol_indices['S1_conf'], nan=0.0)
+ST_conf = np.nan_to_num(sobol_indices['ST_conf'], nan=0.0)
+
+# Signed direction via Pearson correlation (approx. directional sensitivity)
+signed_corr = [pearsonr(param_values[:, i], Y_sobol_pred)[0] for i in range(X.shape[1])]
+
+# Apply sign to first-order and total-order indices
+s1_signed = np.sign(signed_corr) * S1
+st_signed = np.sign(signed_corr) * ST
+
+# Collect results
+sobol_df_signed = pd.DataFrame({
+    'Feature': problem['names'],
+    'Signed S1': s1_signed,
+    'S1 Conf': S1_conf,
+    'Signed ST': st_signed,
+    'ST Conf': ST_conf,
+    'Correlation': signed_corr
+})
+
+# Keep feature order
+sobol_df_signed['Original Order'] = range(len(sobol_df_signed))
+sobol_df_signed.sort_values(by='Original Order', inplace=True)
+sobol_df_signed.drop(columns='Original Order', inplace=True)
+
+print("\n\033[94m--- Signed Sobol Sensitivity Analysis Results (XGBoost) ---\033[0m")
+print(sobol_df_signed)
+
+# Save
+signed_csv_path = os.path.join(save_path, "Signed_Sobol_Sensitivity_XGBoost.csv")
+sobol_df_signed.to_csv(signed_csv_path, index=False)
+print(f"\n\033[92mSigned Sobol results saved at:\033[0m {signed_csv_path}")
+
+# Plotting
+plt.rcParams.update({'font.size': PLOT_PARAMS['tick_size'], 
+                     'figure.figsize': (12, 6)})
+sns.set_style("whitegrid")
+
+# --- Plot Signed S1 (Color) ---
+plt.figure()
+sns.barplot(x='Signed S1', y='Feature', data=sobol_df_signed,
+            palette=['crimson' if val < 0 else 'teal' for val in sobol_df_signed['Signed S1']])
+plt.axvline(0, color='black', linestyle='--', linewidth=2)  # Changed to linewidth=2
+plt.title("Signed First-order Sobol Sensitivity (1st order)", fontsize=PLOT_PARAMS['title_size'])
+plt.xlabel("Signed S1", fontsize=PLOT_PARAMS['label_size'])
+plt.ylabel("Feature", fontsize=PLOT_PARAMS['label_size'])
+plt.grid(False)  # No grid lines
+plt.tight_layout()
+plt.savefig(os.path.join(save_path, "Signed_Sobol_S1.png"), dpi=PLOT_PARAMS['dpi'])
+plt.show()
+
+# --- Plot Signed ST (Color) ---
+plt.figure()
+sns.barplot(x='Signed ST', y='Feature', data=sobol_df_signed,
+            palette=['crimson' if val < 0 else 'teal' for val in sobol_df_signed['Signed ST']])
+plt.axvline(0, color='black', linestyle='--', linewidth=2)  # Changed to linewidth=2
+plt.title("Signed Total-order Sobol Sensitivity", fontsize=PLOT_PARAMS['title_size'])
+plt.xlabel("Signed ST", fontsize=PLOT_PARAMS['label_size'])
+plt.ylabel("Feature", fontsize=PLOT_PARAMS['label_size'])
+plt.grid(False)  # No grid lines
+plt.tight_layout()
+plt.savefig(os.path.join(save_path, "Signed_Sobol_ST.png"), dpi=PLOT_PARAMS['dpi'])
+plt.show()
+
+print(f"\n✅ All analysis completed. Model and results saved to: {save_path}")

@@ -1,0 +1,554 @@
+import pandas as pd
+import numpy as np
+import os
+import statsmodels.api as sm
+import seaborn as sns
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import PolynomialFeatures, StandardScaler
+from sklearn.svm import SVR
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+from sklearn.inspection import permutation_importance
+import pickle
+from SALib.sample import saltelli 
+from SALib.analyze import sobol
+from scipy.stats import pearsonr
+import numpy as np
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+import os
+
+# Set global plot parameters
+plt.rcParams['axes.grid'] = False  # Remove grid lines
+plt.rcParams['axes.facecolor'] = 'white'  # Set background to white
+plt.rcParams['figure.facecolor'] = 'white'  # Set figure background to white
+plt.rcParams['lines.linewidth'] = 6  # Set default line width
+plt.rcParams['font.size'] = 20  # Set default font size
+
+# ---------------- PATHS ----------------
+file_path = r'C:/Users/admin/Downloads/FINAL DATA/Dataset_4.csv'
+save_path = r'C:/Users/admin/Downloads/SVR_OLD/SVR_4'
+os.makedirs(save_path, exist_ok=True)
+
+# Load data
+data = pd.read_csv(os.path.join(save_path, "C:/Users/admin/Downloads/FINAL DATA/Dataset_4.csv"))
+data.columns = data.columns.str.strip()
+
+# Define independent variables (X) and dependent variable (Y)
+X = data[['Ni', 'Si', 'Y', 'La', 'Ce', 'Pr', 'Sm', 'Milling Time', 'Des. Pressure', 'Des. Temperature']]
+Y = data['Hydrogen Des. Weight (%)']
+
+# Feature scaling
+scaler_X = StandardScaler()
+scaler_Y = StandardScaler()
+X_scaled = scaler_X.fit_transform(X)
+Y_scaled = scaler_Y.fit_transform(Y.values.reshape(-1, 1)).flatten()
+
+from sklearn.model_selection import train_test_split
+
+# Split data (80% training, 20% testing)
+X_train, X_test, Y_train, Y_test = train_test_split(X, Y, test_size=0.3, random_state=7)
+
+# Feature scaling (fit on train, transform on both train and test)
+scaler_X = StandardScaler()
+scaler_Y = StandardScaler()
+
+X_train_scaled = scaler_X.fit_transform(X_train)
+X_test_scaled = scaler_X.transform(X_test)
+
+Y_train_scaled = scaler_Y.fit_transform(Y_train.values.reshape(-1, 1)).flatten()
+Y_test_scaled = scaler_Y.transform(Y_test.values.reshape(-1, 1)).flatten()
+
+# Modify the train_svr function to take train and test data
+def train_svr(kernel, X_train_scaled, Y_train_scaled, X_test_scaled, Y_test_scaled, **kwargs):
+    svr = SVR(kernel=kernel, **kwargs)
+    svr.fit(X_train_scaled, Y_train_scaled)
+
+    # Predict on scaled data
+    Y_train_pred_scaled = svr.predict(X_train_scaled)
+    Y_test_pred_scaled = svr.predict(X_test_scaled)
+
+    # Inverse transform predictions to original scale
+    Y_train_pred = scaler_Y.inverse_transform(Y_train_pred_scaled.reshape(-1, 1)).flatten()
+    Y_test_pred = scaler_Y.inverse_transform(Y_test_pred_scaled.reshape(-1, 1)).flatten()
+
+    # Inverse transform ground truth to original scale
+    Y_train = scaler_Y.inverse_transform(Y_train_scaled.reshape(-1, 1)).flatten()
+    Y_test = scaler_Y.inverse_transform(Y_test_scaled.reshape(-1, 1)).flatten()
+
+    # Metrics
+    mse_train = mean_squared_error(Y_train, Y_train_pred)
+    mse_test = mean_squared_error(Y_test, Y_test_pred)
+
+    r2_train = r2_score(Y_train, Y_train_pred) * 100
+    r2_test = r2_score(Y_test, Y_test_pred) * 100
+
+    mae_train = mean_absolute_error(Y_train, Y_train_pred)
+    mae_test = mean_absolute_error(Y_test, Y_test_pred)
+
+    accuracy_train = (1 - (mae_train / np.mean(Y_train))) * 100
+    accuracy_test = (1 - (mae_test / np.mean(Y_test))) * 100
+
+    rase_train = np.sqrt(mse_train)
+    rase_test = np.sqrt(mse_test)
+
+    num_support_vectors = len(svr.support_)
+
+    return svr, Y_test_pred, mse_train, mse_test, r2_train, r2_test, mae_train, mae_test, accuracy_train, accuracy_test, rase_train, rase_test, num_support_vectors
+
+
+# Train SVR models
+svr_rbf, Y_pred_rbf, mse_train_rbf, mse_test_rbf, r2_train_rbf, r2_test_rbf, mae_train_rbf, mae_test_rbf, acc_train_rbf, acc_test_rbf, rase_train_rbf, rase_test_rbf, num_sv_rbf = train_svr('rbf', X_train_scaled, Y_train_scaled, X_test_scaled, Y_test_scaled, C=1, gamma=0.1, epsilon=0.1)
+
+svr_poly, Y_pred_poly, mse_train_poly, mse_test_poly, r2_train_poly, r2_test_poly, mae_train_poly, mae_test_poly, acc_train_poly, acc_test_poly, rase_train_poly, rase_test_poly, num_sv_poly = train_svr('poly', X_train_scaled, Y_train_scaled, X_test_scaled, Y_test_scaled, C=1, degree=3, epsilon=0.1)
+
+
+# Print results
+print("\n\033[94m--- RBF Kernel Performance ---\033[0m")
+print(f"Train MSE: \033[92m{mse_train_rbf:.4f}\033[0m, Test MSE: \033[92m{mse_test_rbf:.4f}\033[0m")
+print(f"Train R²: \033[92m{r2_train_rbf:.2f}%\033[0m, Test R²: \033[92m{r2_test_rbf:.2f}%\033[0m")
+print(f"Train Accuracy: \033[92m{acc_train_rbf:.2f}%\033[0m, Test Accuracy: \033[92m{acc_test_rbf:.2f}%\033[0m")
+
+print("\n\033[91m--- Polynomial Kernel Performance ---\033[0m")
+print(f"Train MSE: \033[92m{mse_train_poly:.4f}\033[0m, Test MSE: \033[92m{mse_test_poly:.4f}\033[0m")
+print(f"Train R²: \033[92m{r2_train_poly:.2f}%\033[0m, Test R²: \033[92m{r2_test_poly:.2f}%\033[0m")
+print(f"Train Accuracy: \033[92m{acc_train_poly:.2f}%\033[0m, Test Accuracy: \033[92m{acc_test_poly:.2f}%\033[0m")
+
+
+# Train full SVR model (on entire data) for permutation importance and plotting
+def train_svr_full(kernel, **kwargs):
+    svr = SVR(kernel=kernel, **kwargs)
+    svr.fit(X_scaled, Y_scaled)
+    
+    Y_pred_scaled = svr.predict(X_scaled)
+    Y_pred = scaler_Y.inverse_transform(Y_pred_scaled.reshape(-1, 1)).flatten()
+    
+    mse = mean_squared_error(Y, Y_pred)
+    r2 = r2_score(Y, Y_pred) * 100
+    mae = mean_absolute_error(Y, Y_pred)
+    accuracy = (1 - (mae / np.mean(Y))) * 100
+    rase = np.sqrt(np.mean(np.square(Y - Y_pred)))
+    num_support_vectors = len(svr.support_)
+    
+    return svr, Y_pred, mse, r2, mae, accuracy, rase, num_support_vectors
+
+# Train SVR models on full data
+svr_rbf_full, Y_pred_rbf_full, mse_rbf, r2_rbf, mae_rbf, acc_rbf, rase_rbf, num_sv_rbf = train_svr_full('rbf', C=1, gamma=0.1, epsilon=0.1)
+svr_poly_full, Y_pred_poly_full, mse_poly, r2_poly, mae_poly, acc_poly, rase_poly, num_sv_poly = train_svr_full('poly', C=1, degree=3, epsilon=0.1)
+
+# Frequency count of actual values
+value_counts = Y.value_counts()
+
+
+
+# Print model performance
+print("\n\033[94m--- RBF Kernel Performance ---\033[0m")
+print(f"Mean Squared Error (MSE): \033[92m{mse_rbf:.4f}\033[0m")
+print(f"R² Score: \033[92m{r2_rbf:.2f}%\033[0m")
+print(f"Mean Absolute Error (MAE): \033[92m{mae_rbf:.4f}\033[0m")
+print(f"Root Absolute Squared Error (RASE): \033[92m{rase_rbf:.4f}\033[0m")
+print(f"Prediction Accuracy: \033[92m{acc_rbf:.2f}%\033[0m")
+print(f"Number of Support Vectors: \033[92m{num_sv_rbf}\033[0m")
+
+print("\n\033[91m--- Polynomial Kernel Performance ---\033[0m")
+print(f"Mean Squared Error (MSE): \033[92m{mse_poly:.4f}\033[0m")
+print(f"R² Score: \033[92m{r2_poly:.2f}%\033[0m")
+print(f"Mean Absolute Error (MAE): \033[92m{mae_poly:.4f}\033[0m")
+print(f"Root Absolute Squared Error (RASE): \033[92m{rase_poly:.4f}\033[0m")
+print(f"Prediction Accuracy: \033[92m{acc_poly:.2f}%\033[0m")
+print(f"Number of Support Vectors: \033[92m{num_sv_poly}\033[0m")
+
+print("\n\033[93m--- Frequency Count of Actual Values ---\033[0m")
+print(value_counts)
+
+
+
+# Save all results to CSV
+results_df = pd.DataFrame({
+    'Metric': ['MSE', 'R2 Score', 'MAE', 'RASE', 'Accuracy', 'Support Vectors'],
+    'RBF Kernel': [mse_rbf, r2_rbf, mae_rbf, rase_rbf, acc_rbf, num_sv_rbf],
+    'Polynomial Kernel': [mse_poly, r2_poly, mae_poly, rase_poly, acc_poly, num_sv_poly]
+})
+results_csv_path = os.path.join(save_path, "SVR_Results.csv")
+results_df.to_csv(results_csv_path, index=False)
+
+print("\n\033[92mAll results saved successfully! CSV Path:\033[0m " + results_csv_path)
+
+
+# Plot SVR Predictions for Both Kernels
+for kernel, Y_pred, svr in zip(
+    ["RBF", "Polynomial"], 
+    [Y_pred_rbf_full, Y_pred_poly_full], 
+    [svr_rbf_full, svr_poly_full]
+):
+    plt.figure(figsize=(10, 7))
+    sns.set_style("white")
+    
+    # Scatter of predictions
+    plt.scatter(Y, Y_pred, color="green", label="Data Points", edgecolors="black", linewidth=2, s=80)
+    plt.plot([min(Y), max(Y)], [min(Y), max(Y)], color="red", linewidth=2, label="Hyperplane (Perfect Fit)")
+    
+    # Support vector predictions
+    support_vector_predictions = scaler_Y.inverse_transform(
+        svr.predict(X_scaled[svr.support_]).reshape(-1, 1)
+    ).flatten()
+    plt.scatter(
+        Y.iloc[svr.support_], support_vector_predictions, 
+        color="orange", edgecolors="black", s=120, marker="o", label="Support Vectors"
+    )
+    
+    # Epsilon margin
+    epsilon_scaled = scaler_Y.scale_[0] * 0.1
+    plt.plot([min(Y), max(Y)], [min(Y) + epsilon_scaled, max(Y) + epsilon_scaled], "k--", label="Epsilon Margin (+ε)")
+    plt.plot([min(Y), max(Y)], [min(Y) - epsilon_scaled, max(Y) - epsilon_scaled], "k--", label="Epsilon Margin (-ε)")
+    
+    # Labels & Title
+    plt.xlabel("Actual Hydrogen Des. Weight (%)')", fontsize=14, fontweight='bold')
+    plt.ylabel("Predicted Hydrogen Des. Weight (%)'", fontsize=14, fontweight='bold')
+    plt.title(f"Support Vector Regression of Hydrogen Sorption ({kernel} Kernel)", fontsize=16, fontweight='bold')
+    plt.legend()
+    
+    # === Save before showing ===
+    filename = f"SVR_{kernel}_Kernel.png"
+    plt.savefig(os.path.join(save_path, filename), dpi=300, bbox_inches="tight")
+    plt.show()
+    plt.close()
+
+# Plot SVR Predictions for Both Kernels in Black and White
+for kernel, Y_pred, svr in zip(
+    ["RBF", "Polynomial"], 
+    [Y_pred_rbf_full, Y_pred_poly_full], 
+    [svr_rbf_full, svr_poly_full]
+):
+    plt.figure(figsize=(10, 7))
+    
+    # Set style for B&W plot
+    plt.style.use('default')
+    plt.rcParams.update({'axes.grid': False})
+    
+    # Scatter of predictions - use different markers for B&W
+    plt.scatter(Y, Y_pred, color="white", label="Data Points", 
+                edgecolors="black", linewidth=1.5, s=80, marker="o")
+    
+    # Perfect fit line - solid black
+    plt.plot([min(Y), max(Y)], [min(Y), max(Y)], color="black", 
+             linewidth=2, label="Perfect Fit")
+    
+    # Support vector predictions - use different markers
+    support_vector_predictions = scaler_Y.inverse_transform(
+        svr.predict(X_scaled[svr.support_]).reshape(-1, 1)
+    ).flatten()
+    plt.scatter(
+        Y.iloc[svr.support_], support_vector_predictions, 
+        color="white", edgecolors="black", s=120, marker="s", 
+        linewidth=1.5, label="Support Vectors"
+    )
+    
+    # Epsilon margin - use different line styles
+    epsilon_scaled = scaler_Y.scale_[0] * 0.1
+    plt.plot([min(Y), max(Y)], [min(Y) + epsilon_scaled, max(Y) + epsilon_scaled], 
+             "k--", linewidth=1.5, label="+ε Margin")
+    plt.plot([min(Y), max(Y)], [min(Y) - epsilon_scaled, max(Y) - epsilon_scaled], 
+             "k:", linewidth=1.5, label="-ε Margin")
+    
+    # Labels & Title
+    plt.xlabel("Actual Hydrogen Des. Weight (%)", fontsize=14, fontweight='bold')
+    plt.ylabel("Predicted Hydrogen Des. Weight (%)", fontsize=14, fontweight='bold')
+    plt.title(f"Support Vector Regression of Hydrogen Sorption ({kernel} Kernel) - B&W", 
+              fontsize=16, fontweight='bold')
+    plt.legend(frameon=False)
+    
+    # Remove top and right spines for cleaner look
+    plt.gca().spines['top'].set_visible(False)
+    plt.gca().spines['right'].set_visible(False)
+    
+    # === Save before showing ===
+    filename = f"SVR_{kernel}_Kernel_BW.png"
+    plt.savefig(os.path.join(save_path, filename), dpi=300, bbox_inches="tight")
+    plt.show()
+    plt.close()
+    
+
+# Extract support vectors, dual coefficients, bias, and gamma
+support_vectors = scaler_X.inverse_transform(svr_rbf.support_vectors_)  # Convert back to original scale
+dual_coeffs = svr_rbf.dual_coef_[0]  # Dual coefficients (alpha values)
+intercept = svr_rbf.intercept_[0]  # Bias term
+gamma = svr_rbf.gamma  # Gamma value used in the RBF kernel
+
+# Feature names from dataset
+feature_names = X.columns.tolist()
+
+# Construct the SVR RBF equation with feature names
+rbf_terms = []
+for i in range(len(support_vectors)):
+    squared_terms = " + ".join([f"({feature_names[j]} - {support_vectors[i, j]:.4f})²" for j in range(len(feature_names))])
+    rbf_terms.append(f"({dual_coeffs[i]:.4f} * exp(-{gamma:.4f} * ({squared_terms})))")
+
+rbf_equation = f"Y = {intercept:.4f} + " + " + ".join(rbf_terms)
+
+
+# Print full RBF kernel equation
+print("\n\033[94m--- SVR RBF Kernel Regression Equation ---\033[0m")
+print(f"\n\033[93mY = {intercept:.4f} + Σ (αᵢ * exp(-γ * ||X - Xᵢ||²))\033[0m")
+print("\nWhere each term:\n")
+
+for i in range(len(support_vectors)):
+    squared_terms = " + ".join([f"({feature_names[j]} - {support_vectors[i, j]:.4f})²" for j in range(len(feature_names))])
+    term = f"{dual_coeffs[i]:+.4f} * exp(-{gamma:.4f} * ({squared_terms}))"
+    print(f"  Term {i+1}: {term}")
+
+
+# Optional: Save the equation to a text file for easier reference
+equation_path = os.path.join(save_path, "SVR_RBF_Equation.txt")
+with open(equation_path, 'w') as f:
+    f.write("SVR RBF Kernel Equation:\n")
+    f.write(rbf_equation)
+
+print("\n\033[92mSVR RBF equation saved successfully! Path:\033[0m " + equation_path)
+
+
+
+# Convert all necessary variables to float
+intercept_poly = float(svr_poly.intercept_[0])
+gamma_poly = float(svr_poly.gamma) if svr_poly.gamma != 'scale' else 1.0 / (X.shape[1] * X.var().mean())
+degree_poly = int(svr_poly.degree)
+coef0_poly = float(svr_poly.coef0)
+
+# Extract SVR parameters for Polynomial Kernel
+support_vectors_poly = scaler_X.inverse_transform(svr_poly.support_vectors_)  # Convert back to original scale
+dual_coeffs_poly = svr_poly.dual_coef_[0]  # Dual coefficients (alpha values)
+intercept_poly = float(svr_poly.intercept_[0])  # Bias term
+gamma_poly = float(svr_poly.gamma) if svr_poly.gamma != 'scale' else 1.0 / (X.shape[1] * X.var().mean())  # Gamma
+degree_poly = int(svr_poly.degree)  # Polynomial degree
+coef0_poly = float(svr_poly.coef0)  # Coefficient r
+
+# Construct the SVR Polynomial Kernel equation
+poly_terms = []
+for i in range(len(support_vectors_poly)):
+    dot_product = " + ".join([f"({feature_names[j]} * {float(support_vectors_poly[i, j]):.4f})" for j in range(len(feature_names))])
+    poly_terms.append(f"({float(dual_coeffs_poly[i]):.4f} * ({gamma_poly:.4f} * ({dot_product}) + {coef0_poly:.4f})^{degree_poly})")
+
+poly_equation = f"Y = {intercept_poly:.4f} + " + " + ".join(poly_terms)
+
+# Print the Polynomial Kernel equation
+print("\n--- SVR Prediction Equation with Polynomial Kernel ---")
+print(poly_equation)
+
+
+# Create a DataFrame to store feature importance rankings
+feature_importance_df = pd.DataFrame(index=X.columns)
+
+# Compute feature importance using support vectors
+rbf_importance = np.abs(svr_rbf.dual_coef_) @ np.abs(svr_rbf.support_vectors_)
+poly_importance = np.abs(svr_poly.dual_coef_) @ np.abs(svr_poly.support_vectors_)
+
+# Normalize and rank feature importance
+feature_importance_df['RBF Importance'] = rbf_importance.flatten()
+feature_importance_df['Polynomial Importance'] = poly_importance.flatten()
+feature_importance_df['RBF Rank'] = feature_importance_df['RBF Importance'].rank(ascending=False)
+feature_importance_df['Poly Rank'] = feature_importance_df['Polynomial Importance'].rank(ascending=False)
+
+# Sort by rank
+feature_importance_df.sort_values(by=['RBF Rank', 'Poly Rank'], ascending=True, inplace=True)
+
+# Print the feature importance table
+print("\n\033[93m--- Feature Importance Rankings ---\033[0m")
+print(feature_importance_df)
+
+# Optional: Save feature importance to CSV
+feature_importance_csv_path = os.path.join(save_path, "Feature_Importance.csv")
+feature_importance_df.to_csv(feature_importance_csv_path, index=True)
+
+print("\n\033[92mFeature importance rankings saved successfully! CSV Path:\033[0m " + feature_importance_csv_path)
+
+
+
+# Perform permutation importance
+perm_importance = permutation_importance(
+    svr_rbf, X_scaled, Y_scaled, n_repeats=50, random_state=42, scoring='r2'
+)
+
+# Extract results
+importances = perm_importance.importances_mean
+stds = perm_importance.importances_std
+
+# Approximate p-values: features with mean importance significantly > 0
+p_values = []
+for imp, std in zip(importances, stds):
+    if std == 0:
+        p_values.append(1.0)  # If no variation, p = 1
+    else:
+        t_stat = imp / std
+        from scipy.stats import norm
+        p_value = 2 * (1 - norm.cdf(abs(t_stat)))  # Two-tailed test
+        p_values.append(p_value)
+
+# Create a DataFrame
+significance_df = pd.DataFrame({
+    'Feature': X.columns,
+    'Importance': importances,
+    'Std Dev': stds,
+    'P-Value': p_values,
+    'Significant (<0.05)': ['Yes' if p < 0.05 else 'No' for p in p_values]
+})
+
+# Sort by importance
+significance_df = significance_df.sort_values(by="Importance", ascending=False)
+
+# Display results
+print(significance_df)
+
+# Save to CSV
+significance_df.to_csv(os.path.join(save_path, "SVR_Feature_Significance.csv"), index=False)
+print("\n\033[92mFeature significance saved to CSV!\033[0m")
+
+# Save trained SVR models to pickle files
+rbf_model_path = os.path.join(save_path, "SVR_RBF_Model.pkl")
+poly_model_path = os.path.join(save_path, "SVR_Poly_Model.pkl")
+
+with open(rbf_model_path, 'wb') as f:
+    pickle.dump(svr_rbf_full, f)
+
+with open(poly_model_path, 'wb') as f:
+    pickle.dump(svr_poly_full, f)
+
+print(f"\n\033[92mRBF SVR model saved at:\033[0m {rbf_model_path}")
+print(f"\033[92mPolynomial SVR model saved at:\033[0m {poly_model_path}")
+
+# Save the scalers used in the full model training
+scaler_X_path = os.path.join(save_path, "Scaler_X.pkl")
+scaler_Y_path = os.path.join(save_path, "Scaler_Y.pkl")
+
+with open(scaler_X_path, 'wb') as f:
+    pickle.dump(scaler_X, f)
+
+with open(scaler_Y_path, 'wb') as f:
+    pickle.dump(scaler_Y, f)
+
+print(f"\033[92mScalers saved successfully!\033[0m")
+
+# Load model and scalers
+with open(rbf_model_path, 'rb') as f:
+    svr_loaded = pickle.load(f)
+with open(scaler_X_path, 'rb') as f:
+    scaler_X_loaded = pickle.load(f)
+with open(scaler_Y_path, 'rb') as f:
+    scaler_Y_loaded = pickle.load(f)
+
+# Predict
+X_new = scaler_X_loaded.transform(X)  # or new input data
+Y_pred_scaled = svr_loaded.predict(X_new)
+Y_pred = scaler_Y_loaded.inverse_transform(Y_pred_scaled.reshape(-1, 1)).flatten()
+
+
+
+# ===============================
+# Define the problem (safe bounds)
+# ===============================
+bounds = []
+for col in X.columns:
+    col_min, col_max = X[col].min(), X[col].max()
+    if col_min == col_max:  
+        # avoid zero-width bound
+        col_min -= 1e-6
+        col_max += 1e-6
+    bounds.append([col_min, col_max])
+
+problem = {
+    'num_vars': X.shape[1],
+    'names': X.columns.tolist(),
+    'bounds': bounds
+}
+
+# ===============================
+# Sobol sampling
+# ===============================
+param_values = saltelli.sample(problem, 1024, calc_second_order=True)
+
+# Ensure shape matches before scaling
+if param_values.shape[1] != X.shape[1]:
+    raise ValueError(
+        f"Shape mismatch: Sobol sample has {param_values.shape[1]} cols, "
+        f"but dataset has {X.shape[1]} features"
+    )
+
+# Scale params into model space
+param_values_scaled = scaler_X.transform(param_values)
+
+# Predict using trained model
+Y_sobol_pred_scaled = svr_rbf_full.predict(param_values_scaled)
+Y_sobol_pred = scaler_Y.inverse_transform(
+    Y_sobol_pred_scaled.reshape(-1, 1)
+).flatten()
+
+# ===============================
+# Sobol Analysis
+# ===============================
+sobol_indices = sobol.analyze(problem, Y_sobol_pred, print_to_console=False)
+
+# Signed direction via Pearson correlation (approx directional sensitivity)
+signed_corr = [
+    pearsonr(param_values[:, i], Y_sobol_pred)[0] for i in range(X.shape[1])
+]
+
+# Apply sign to indices
+s1_signed = np.sign(signed_corr) * sobol_indices['S1']
+st_signed = np.sign(signed_corr) * sobol_indices['ST']
+
+# ===============================
+# Collect results
+# ===============================
+sobol_df_signed = pd.DataFrame({
+    'Feature': problem['names'],
+    'Signed S1': s1_signed,
+    'S1 Conf': sobol_indices['S1_conf'],
+    'Signed ST': st_signed,
+    'ST Conf': sobol_indices['ST_conf'],
+    'Correlation': signed_corr
+})
+
+sobol_df_signed['Original Order'] = range(len(sobol_df_signed))
+sobol_df_signed.sort_values(by='Original Order', inplace=True)
+sobol_df_signed.drop(columns='Original Order', inplace=True)
+
+print("\n\033[94m--- Signed Sobol Sensitivity Analysis Results (RBF SVR) ---\033[0m")
+print(sobol_df_signed)
+
+# Save
+signed_csv_path = os.path.join(save_path, "Signed_Sobol_Sensitivity_RBF_SVR.csv")
+sobol_df_signed.to_csv(signed_csv_path, index=False)
+print(f"\n\033[92mSigned Sobol results saved at:\033[0m {signed_csv_path}")
+
+# ===============================
+# Plotting
+# ===============================
+plt.rcParams.update({'font.size': 12, 'figure.figsize': (12, 6)})
+sns.set_style("white")
+
+# --- Plot Signed S1 ---
+plt.figure()
+sns.barplot(
+    x='Signed S1', y='Feature', data=sobol_df_signed,
+    palette=['crimson' if val < 0 else 'teal' for val in sobol_df_signed['Signed S1']]
+)
+plt.axvline(0, color='black', linestyle='--')
+plt.title("Signed First-order Sobol Sensitivity (1St order)")
+plt.xlabel("Signed S1")
+plt.ylabel("Feature")
+plt.tight_layout()
+plt.savefig(os.path.join(save_path, "Signed_Sobol_S1.png"))
+plt.show()
+
+# --- Plot Signed ST ---
+plt.figure()
+sns.barplot(
+    x='Signed ST', y='Feature', data=sobol_df_signed,
+    palette=['crimson' if val < 0 else 'teal' for val in sobol_df_signed['Signed ST']]
+)
+plt.axvline(0, color='black', linestyle='--')
+plt.title("Signed Total-order Sobol Sensitivity")
+plt.xlabel("Signed ST")
+plt.ylabel("Feature")
+plt.tight_layout()
+plt.savefig(os.path.join(save_path, "Signed_Sobol.png"))
+plt.show()

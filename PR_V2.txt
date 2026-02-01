@@ -1,0 +1,328 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.preprocessing import PolynomialFeatures, StandardScaler
+from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+from scipy import stats
+import os
+
+# Create output directory if it doesn't exist
+output_dir = "C:/Users/admin/Downloads/PR_Results/PR_2"
+os.makedirs(output_dir, exist_ok=True)
+
+# Load and preprocess the data
+file_path = "C:/Users/admin/Downloads/FINAL DATA/Dataset_2.csv"
+data = pd.read_csv(file_path)
+
+# Clean column names
+data.columns = data.columns.str.strip()
+
+# Define independent variables (X) and dependent variable (Y)
+X = data[['Ni', 'Si', 'Y', 'La', 'Ce', 'Pr', 'Sm', 'Milling Time', 'Abs. Pressure', 'Abs. Temperature']]
+Y = data['Hydrogen Abs. Weight (%)']
+
+# ==================== OVERALL DATASET ANALYSIS ====================
+# Save basic dataset statistics
+dataset_stats = pd.DataFrame({
+    'Statistic': ['Number of Samples', 'Number of Features', 'Mean Target', 
+                  'Std Target', 'Min Target', 'Max Target'],
+    'Value': [len(data), len(X.columns), Y.mean(), Y.std(), Y.min(), Y.max()]
+})
+dataset_stats.to_csv(os.path.join(output_dir, 'Dataset_Statistics.csv'), index=False)
+
+# Feature correlation with target
+feature_correlations = pd.DataFrame({
+    'Feature': X.columns,
+    'Correlation with Target': [X[col].corr(Y) for col in X.columns]
+})
+feature_correlations.to_csv(os.path.join(output_dir, 'Feature_Correlations.csv'), index=False)
+
+# ==================== OVERALL MODEL (NO TRAIN/TEST SPLIT) ====================
+# Fit model on entire dataset for overall equation
+scaler_X_overall = StandardScaler()
+X_scaled_overall = scaler_X_overall.fit_transform(X)
+
+scaler_Y_overall = StandardScaler()
+Y_scaled_overall = scaler_Y_overall.fit_transform(Y.values.reshape(-1, 1)).flatten()
+
+poly_overall = PolynomialFeatures(degree=2)
+X_poly_overall = poly_overall.fit_transform(X_scaled_overall)
+
+model_overall = LinearRegression()
+model_overall.fit(X_poly_overall, Y_scaled_overall)
+
+Y_pred_overall = model_overall.predict(X_poly_overall)
+Y_pred_overall_original = scaler_Y_overall.inverse_transform(Y_pred_overall.reshape(-1, 1)).flatten()
+
+# Performance metrics for overall model
+r_squared_overall = r2_score(Y, Y_pred_overall_original) * 100
+MSE_overall = mean_squared_error(Y, Y_pred_overall_original)
+RMSE_overall = np.sqrt(MSE_overall)
+MAE_overall = mean_absolute_error(Y, Y_pred_overall_original)
+
+# ==================== TRAIN/TEST MODEL FOR EDGE PLOTS ====================
+# Split the data into training and testing sets (70/30 split)
+X_train, X_test, Y_train, Y_test = train_test_split(X, Y, test_size=0.3, random_state=42)
+
+# Use the same scalers as the overall model for consistency
+X_train_scaled = scaler_X_overall.transform(X_train)
+X_test_scaled = scaler_X_overall.transform(X_test)
+
+Y_train_scaled = scaler_Y_overall.transform(Y_train.values.reshape(-1, 1)).flatten()
+Y_test_scaled = scaler_Y_overall.transform(Y_test.values.reshape(-1, 1)).flatten()
+
+# Initialize PolynomialFeatures with the desired degree
+degree = 2  
+poly = PolynomialFeatures(degree=degree)
+X_poly_train = poly.fit_transform(X_train_scaled)
+X_poly_test = poly.transform(X_test_scaled)
+
+# Initialize and fit the Linear Regression model
+model = LinearRegression()
+model.fit(X_poly_train, Y_train_scaled)
+
+# Make predictions
+Y_pred_train = model.predict(X_poly_train)
+Y_pred_test = model.predict(X_poly_test)
+
+# Inverse transform the scaled predictions and actual values
+Y_pred_train_original = scaler_Y_overall.inverse_transform(Y_pred_train.reshape(-1, 1)).flatten()
+Y_pred_test_original = scaler_Y_overall.inverse_transform(Y_pred_test.reshape(-1, 1)).flatten()
+
+# Performance metrics for training set
+r_squared_train = r2_score(Y_train, Y_pred_train_original) * 100
+MSE_train = mean_squared_error(Y_train, Y_pred_train_original)
+RMSE_train = np.sqrt(MSE_train)
+MAE_train = mean_absolute_error(Y_train, Y_pred_train_original)
+
+# Performance metrics for testing set
+r_squared_test = r2_score(Y_test, Y_pred_test_original) * 100
+MSE_test = mean_squared_error(Y_test, Y_pred_test_original)
+RMSE_test = np.sqrt(MSE_test)
+MAE_test = mean_absolute_error(Y_test, Y_pred_test_original)
+
+# Number of observations and predictors
+n_train, p_train = X_poly_train.shape
+
+# Compute residuals
+residuals_train = Y_train_scaled - Y_pred_train
+residual_variance_train = np.var(residuals_train, ddof=p_train+1)
+
+# Compute variance-covariance matrix
+X_with_intercept_train = np.hstack((np.ones((n_train, 1)), X_poly_train))
+cov_matrix = np.linalg.pinv(X_with_intercept_train.T @ X_with_intercept_train) * residual_variance_train
+
+# Standard errors, t-values, and p-values
+standard_errors = np.sqrt(np.diag(cov_matrix))
+t_stats = model.coef_ / standard_errors[1:]
+p_values = [2 * (1 - stats.t.cdf(np.abs(t), df=n_train - p_train - 1)) for t in t_stats]
+
+# Save coefficients and p-values for overall model (using train/test for significance)
+coefficients = pd.DataFrame({
+    'Variable': ['Intercept'] + list(poly_overall.get_feature_names_out(X.columns)),
+    'Coefficient': [model_overall.intercept_] + list(model_overall.coef_),
+    'P-Value': [2 * (1 - stats.t.cdf(np.abs(model.intercept_ / standard_errors[0]), df=n_train - p_train - 1))] + p_values
+})
+
+# Save coefficient file
+coefficients_output_path = os.path.join(output_dir, 'MLR_1.csv')
+coefficients.to_csv(coefficients_output_path, index=False)
+print(f"Coefficients saved to: {coefficients_output_path}")
+
+# Save p-values separately
+p_values_output_path = os.path.join(output_dir, 'Significance_Values_1.csv')
+coefficients[['Variable', 'P-Value']].to_csv(p_values_output_path, index=False)
+print(f"Significance values (p-values) saved to: {p_values_output_path}")
+
+# ==================== PLOT SETTINGS (EDITABLE) ====================
+# Editable parameters for plots
+title_fontsize = 24
+label_fontsize = 18
+tick_fontsize = 20
+legend_fontsize = 20
+line_width = 6
+marker_size = 50
+grid_alpha = 0
+dpi_setting = 600
+
+# ==================== OVERALL DATASET REGRESSION PLOT (COLOR) ====================
+plt.figure(figsize=(10, 6), dpi=dpi_setting)
+plt.scatter(Y, Y_pred_overall_original, color='blue', alpha=0.7, s=marker_size, label='All Data Points')
+plt.plot([min(Y), max(Y)], [min(Y), max(Y)], color='blue', 
+         linestyle='-', linewidth=line_width, label='Perfect Prediction')
+
+plt.xlabel('Observed Hydrogen Absorption Weight', fontsize=label_fontsize, fontweight='bold')
+plt.ylabel('Predicted Hydrogen Absorptio Weight', fontsize=label_fontsize, fontweight='bold')
+plt.title(f'Hydrogen Absorptio Weight', 
+          fontsize=title_fontsize, color='black', fontweight='bold')
+plt.legend(fontsize=legend_fontsize)
+plt.grid(alpha=grid_alpha)
+plt.tight_layout()
+plt.savefig(os.path.join(output_dir, 'Overall_Regression_Color.png'), dpi=dpi_setting, bbox_inches='tight')
+plt.show()
+
+# ==================== OVERALL RESIDUAL PLOT (COLOR) ====================
+plt.figure(figsize=(10, 6), dpi=dpi_setting)
+plt.scatter(Y_pred_overall_original, Y - Y_pred_overall_original, 
+            color='blue', alpha=0.7, s=marker_size, label='Residuals')
+plt.axhline(y=0, color='red', linestyle='-', linewidth=line_width)
+plt.xlabel('Predicted Values', fontsize=label_fontsize, fontweight='bold')
+plt.ylabel('Residuals', fontsize=label_fontsize, fontweight='bold')
+plt.title('Overall Residual Plot', fontsize=title_fontsize, color='red', fontweight='bold')
+plt.legend(fontsize=legend_fontsize)
+plt.grid(alpha=grid_alpha)
+plt.tight_layout()
+plt.savefig(os.path.join(output_dir, 'Overall_Residual_Color.png'), dpi=dpi_setting, bbox_inches='tight')
+plt.show()
+
+# ==================== OVERALL DATASET REGRESSION PLOT (B&W) ====================
+plt.figure(figsize=(10, 6), dpi=dpi_setting)
+plt.scatter(Y, Y_pred_overall_original, color='black', alpha=0.7, s=marker_size, 
+            marker='o', label='All Data Points', edgecolors='black', linewidth=1)
+plt.plot([min(Y), max(Y)], [min(Y), max(Y)], color='black', 
+         linestyle='-', linewidth=line_width, label='Perfect Prediction')
+
+plt.xlabel('Observed Hydrogen Absorptio Weight', fontsize=label_fontsize, fontweight='bold')
+plt.ylabel('Predicted Hydrogen Absorptio Weight', fontsize=label_fontsize, fontweight='bold')
+plt.title(f'Hydrogen Absorptio Weight', 
+          fontsize=title_fontsize, fontweight='bold')
+plt.legend(fontsize=legend_fontsize)
+plt.grid(alpha=grid_alpha)
+plt.tight_layout()
+plt.savefig(os.path.join(output_dir, 'Overall_Regression_BW.png'), dpi=dpi_setting, bbox_inches='tight')
+plt.show()
+
+# ==================== CREATE RESULTS TEXT FILE ====================
+results_file = os.path.join(output_dir, 'Regression_Results.txt')
+with open(results_file, 'w') as f:
+    f.write("="*80 + "\n")
+    f.write("POLYNOMIAL REGRESSION ANALYSIS RESULTS\n")
+    f.write("="*80 + "\n\n")
+    
+    f.write("--- DATASET STATISTICS ---\n")
+    f.write(f"Number of samples: {len(data)}\n")
+    f.write(f"Number of features: {len(X.columns)}\n")
+    f.write(f"Target mean: {Y.mean():.4f}\n")
+    f.write(f"Target std: {Y.std():.4f}\n")
+    f.write(f"Target min: {Y.min():.4f}\n")
+    f.write(f"Target max: {Y.max():.4f}\n\n")
+    
+    f.write("--- OVERALL MODEL (ALL DATA) ---\n")
+    f.write(f"R² Value: {r_squared_overall:.2f}%\n")
+    f.write(f"Mean Square Error (MSE): {MSE_overall:.4f}\n")
+    f.write(f"Root Mean Square Error (RMSE): {RMSE_overall:.4f}\n")
+    f.write(f"Mean Absolute Error (MAE): {MAE_overall:.4f}\n\n")
+    
+    f.write("--- TRAIN/TEST MODEL (70/30 SPLIT) - FOR EDGE PLOTS ONLY ---\n")
+    f.write("Training Set:\n")
+    f.write(f"  R² Value: {r_squared_train:.2f}%\n")
+    f.write(f"  Mean Square Error (MSE): {MSE_train:.4f}\n")
+    f.write(f"  Root Mean Square Error (RMSE): {RMSE_train:.4f}\n")
+    f.write(f"  Mean Absolute Error (MAE): {MAE_train:.4f}\n\n")
+    
+    f.write("Testing Set:\n")
+    f.write(f"  R² Value: {r_squared_test:.2f}%\n")
+    f.write(f"  Mean Square Error (MSE): {MSE_test:.4f}\n")
+    f.write(f"  Root Mean Square Error (RMSE): {RMSE_test:.4f}\n")
+    f.write(f"  Mean Absolute Error (MAE): {MAE_test:.4f}\n\n")
+    
+    f.write("--- REGRESSION EQUATIONS ---\n\n")
+    f.write("Overall Model Equation (Scaled Data):\n")
+    overall_equation = "Y = {:.4f} + ".format(model_overall.intercept_)
+    overall_equation += " + ".join(["{:.4f} * {}".format(coef, var) for coef, var in zip(model_overall.coef_, poly_overall.get_feature_names_out(X.columns))])
+    f.write(overall_equation + "\n\n")
+    
+    f.write("--- SENSITIVITY ANALYSIS FROM EQUATIONS ---\n\n")
+    f.write("Most influential features (by absolute coefficient magnitude):\n")
+    feature_importance = pd.DataFrame({
+        'Feature': poly_overall.get_feature_names_out(X.columns),
+        'Coefficient': model_overall.coef_,
+        'Absolute_Coefficient': np.abs(model_overall.coef_)
+    })
+    feature_importance = feature_importance.sort_values('Absolute_Coefficient', ascending=False)
+    f.write(feature_importance[['Feature', 'Coefficient']].head(10).to_string(index=False) + "\n\n")
+    
+    f.write("--- SIGNIFICANT FEATURES (p < 0.05) ---\n")
+    significant_features = coefficients[coefficients['P-Value'] < 0.05]
+    f.write(significant_features[['Variable', 'Coefficient', 'P-Value']].to_string(index=False) + "\n\n")
+
+# ==================== PRINT RESULTS ====================
+print("\n" + "="*80)
+print("POLYNOMIAL REGRESSION ANALYSIS RESULTS")
+print("="*80)
+
+print("\n--- DATASET STATISTICS ---")
+print(f"Number of samples: {len(data)}")
+print(f"Number of features: {len(X.columns)}")
+print(f"Target mean: {Y.mean():.4f}")
+print(f"Target std: {Y.std():.4f}")
+print(f"Target min: {Y.min():.4f}")
+print(f"Target max: {Y.max():.4f}")
+
+print("\n--- OVERALL MODEL (ALL DATA) ---")
+print(f"R² Value: {r_squared_overall:.2f}%")
+print(f"Mean Square Error (MSE): {MSE_overall:.4f}")
+print(f"Root Mean Square Error (RMSE): {RMSE_overall:.4f}")
+print(f"Mean Absolute Error (MAE): {MAE_overall:.4f}")
+
+print("\n--- TRAIN/TEST MODEL (70/30 SPLIT) - FOR EDGE PLOTS ONLY ---")
+print("Training Set:")
+print(f"  R² Value: {r_squared_train:.2f}%")
+print(f"  Mean Square Error (MSE): {MSE_train:.4f}")
+print(f"  Root Mean Square Error (RMSE): {RMSE_train:.4f}")
+print(f"  Mean Absolute Error (MAE): {MAE_train:.4f}")
+
+print("\nTesting Set:")
+print(f"  R² Value: {r_squared_test:.2f}%")
+print(f"  Mean Square Error (MSE): {MSE_test:.4f}")
+print(f"  Root Mean Square Error (RMSE): {RMSE_test:.4f}")
+print(f"  Mean Absolute Error (MAE): {MAE_test:.4f}")
+
+print("\n--- REGRESSION EQUATIONS ---")
+print("\nOverall Model Equation (Scaled Data):")
+overall_equation = "Y = {:.4f} + ".format(model_overall.intercept_)
+overall_equation += " + ".join(["{:.4f} * {}".format(coef, var) for coef, var in zip(model_overall.coef_, poly_overall.get_feature_names_out(X.columns))])
+print(overall_equation)
+
+print("\n--- SENSITIVITY ANALYSIS FROM EQUATIONS ---")
+print("\nMost influential features (by absolute coefficient magnitude):")
+feature_importance = pd.DataFrame({
+    'Feature': poly_overall.get_feature_names_out(X.columns),
+    'Coefficient': model_overall.coef_,
+    'Absolute_Coefficient': np.abs(model_overall.coef_)
+})
+feature_importance = feature_importance.sort_values('Absolute_Coefficient', ascending=False)
+print(feature_importance[['Feature', 'Coefficient']].head(10).to_string(index=False))
+
+print("\n--- SIGNIFICANT FEATURES (p < 0.05) ---")
+significant_features = coefficients[coefficients['P-Value'] < 0.05]
+print(significant_features[['Variable', 'Coefficient', 'P-Value']].to_string(index=False))
+
+# Save performance metrics
+metrics_df = pd.DataFrame({
+    'Metric': ['R² (%)', 'MSE', 'RMSE', 'MAE'],
+    'Overall': [r_squared_overall, MSE_overall, RMSE_overall, MAE_overall],
+    'Training': [r_squared_train, MSE_train, RMSE_train, MAE_train],
+    'Testing': [r_squared_test, MSE_test, RMSE_test, MAE_test]
+})
+metrics_df.to_csv(os.path.join(output_dir, 'Performance_Metrics.csv'), index=False)
+
+# Save sensitivity analysis
+feature_importance.to_csv(os.path.join(output_dir, 'Feature_Importance.csv'), index=False)
+
+print(f"\nAll files saved in: {output_dir}")
+print("Files created:")
+print("- Overall_Regression_Color.png")
+print("- Overall_Residual_Color.png")
+print("- Overall_Regression_BW.png")
+print("- Train_Test_Comparison.png")
+print("- MLR_1.csv")
+print("- Significance_Values_1.csv")
+print("- Performance_Metrics.csv")
+print("- Dataset_Statistics.csv")
+print("- Feature_Correlations.csv")
+print("- Feature_Importance.csv")
+print("- Regression_Results.txt")
