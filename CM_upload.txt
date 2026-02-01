@@ -1,0 +1,305 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy.stats import pearsonr
+import os
+from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.patches import Rectangle
+
+
+plt.rcParams['font.family'] = 'Arial'
+plt.rcParams['font.weight'] = 'bold'  # Make all text bold
+plt.rcParams['mathtext.fontset'] = 'stix'
+plt.rcParams['axes.titlesize'] = 20   # Increased from 16
+plt.rcParams['axes.labelsize'] = 16   # Increased from 14
+plt.rcParams['xtick.labelsize'] = 14  # Increased from 12
+plt.rcParams['ytick.labelsize'] = 14  # Increased from 12
+plt.rcParams['legend.fontsize'] = 14  # Increased from 12
+plt.rcParams['axes.linewidth'] = 3     # Thicker axis lines
+
+# Create output directory
+output_dir = ""
+os.makedirs(output_dir, exist_ok=True)
+
+# Load dataset
+file_path = ""
+dataset = pd.read_csv(file_path)
+
+# Input features
+input_columns = [
+ 
+]
+
+def compute_p_values(data):
+    """Compute Pearson correlation p-values with symmetry optimization"""
+    n_vars = data.shape[1]
+    p_values = np.zeros((n_vars, n_vars))
+    col_names = data.columns
+    
+    for i in range(n_vars):
+        for j in range(i, n_vars):
+            _, p_val = pearsonr(data.iloc[:, i], data.iloc[:, j])
+            p_values[i, j] = p_val
+            p_values[j, i] = p_val
+    
+    return pd.DataFrame(p_values, columns=col_names, index=col_names)
+
+# Compute correlation and p-values
+corr_matrix = dataset[input_columns].corr()
+p_value_matrix = compute_p_values(dataset[input_columns])
+
+
+def create_diverging_colormap():
+    """Create a colorblind-friendly diverging colormap (blue to red)"""
+    colors = ["#08306b", "#08519c", "#2171b5", "#4292c6", 
+              "#6baed6", "#9ecae1", "#c6dbef", "#eff3ff",
+              "#f7f7f7",  # Center (white)
+              "#fee0d2", "#fcbba1", "#fc9272", "#fb6a4a",
+              "#ef3b2c", "#cb181d", "#a50f15", "#67000d"]
+    return LinearSegmentedColormap.from_list("enhanced_diverging", colors, N=256)
+
+def create_sequential_colormap():
+    """Create a high-contrast sequential colormap"""
+    colors = ["#ffffff", "#f0f0f0", "#d9d9d9", "#bdbdbd", 
+              "#969696", "#737373", "#525252", "#252525",
+              "#000000"]
+    return LinearSegmentedColormap.from_list("enhanced_sequential", colors, N=256)
+
+# Create custom colormaps
+div_cmap = create_diverging_colormap()
+seq_cmap = create_sequential_colormap()
+
+def significance_level(p):
+    """Return significance symbols with asterisks"""
+    if p <= 0.001: return '***'
+    if p <= 0.01:  return '**'
+    if p <= 0.05:  return '*'
+    return ''
+
+def apply_enhanced_style(ax, title, cbar_label):
+    """Apply enhanced publication styling with black borders"""
+    # Title styling - BIGGER AND BOLDER
+    ax.set_title(title, fontsize=22, fontweight='black', pad=25, color='black')
+    cbar = ax.collections[0].colorbar
+    cbar.set_label(cbar_label, fontsize=16, fontweight='black', labelpad=15)
+    cbar.ax.tick_params(labelsize=14, width=2, colors='black')
+    cbar.outline.set_linewidth(3)
+    cbar.outline.set_edgecolor('black')
+    plt.setp(ax.get_xticklabels(), rotation=45, ha='right', 
+             rotation_mode='anchor', fontweight='black')
+    plt.setp(ax.get_yticklabels(), fontweight='black')
+    for spine in ax.spines.values():
+        spine.set_linewidth(4)
+        spine.set_color('black')
+        spine.set_edgecolor('black')
+    rect = Rectangle((0, 0), 1, 1, transform=ax.transAxes,
+                     linewidth=5, edgecolor='black', facecolor='none')
+    ax.add_patch(rect)
+        ax.hlines(range(len(input_columns)+1), *ax.get_xlim(), 
+              colors='black', linewidth=0.8, alpha=0.5)
+    ax.vlines(range(len(input_columns)+1), *ax.get_ylim(), 
+              colors='black', linewidth=0.8, alpha=0.5)
+def add_enhanced_annotations(ax, corr_matrix, p_value_matrix, color_scheme='color'):
+    """Add LARGER, BOLDER correlation values and significance stars"""
+    n_rows, n_cols = corr_matrix.shape
+    for i in range(n_rows):
+        for j in range(n_cols):
+            corr = corr_matrix.iloc[i, j]
+            pval = p_value_matrix.iloc[i, j]
+            sig = significance_level(pval)
+            if color_scheme == 'color':
+                # Enhanced contrast for better visibility
+                if abs(corr) > 0.8:
+                    txt_color = 'white'
+                    txt_weight = 'black'  # Extra bold for high contrast
+                elif abs(corr) > 0.5:
+                    txt_color = 'white'
+                    txt_weight = 'bold'
+                else:
+                    txt_color = 'black'
+                    txt_weight = 'bold'
+            else:
+                # For grayscale
+                if abs(corr) > 0.7:
+                    txt_color = 'white'
+                    txt_weight = 'black'
+                elif abs(corr) > 0.4:
+                    txt_color = 'white'
+                    txt_weight = 'bold'
+                else:
+                    txt_color = 'black'
+                    txt_weight = 'bold'
+            ax.text(
+                j + 0.5, i + 0.65,
+                f"{corr:.2f}",
+                ha="center", va="center",
+                fontsize=15,  # Increased from 11
+                fontweight=txt_weight,
+                color=txt_color,
+                bbox=dict(boxstyle="round,pad=0.2", 
+                         facecolor='none' if abs(corr) < 0.3 else 'black',
+                         alpha=0.1 if abs(corr) < 0.3 else 0,
+                         edgecolor='none')
+            )
+
+            if sig:
+                ax.text(
+                    j + 0.5, i + 0.35,
+                    sig,
+                    ha="center", va="center",
+                    fontsize=14,  # Increased from 10
+                    fontweight='black',
+                    color=txt_color
+                )
+
+fig1, ax1 = plt.subplots(figsize=(13, 11), dpi=300, 
+                         constrained_layout=True,
+                         facecolor='white',
+                         edgecolor='black',
+                         linewidth=5)  # Figure border
+heatmap1 = sns.heatmap(
+    corr_matrix,
+    ax=ax1,
+    annot=False,
+    cmap=div_cmap,
+    center=0,
+    square=True,
+    linewidths=1.2,  # Thicker cell borders
+    linecolor='black',  # Black cell borders
+    cbar_kws={
+        'shrink': 0.85,
+        'label': 'Pearson Correlation Coefficient',
+        'pad': 0.03,
+        'extend': 'both'
+    },
+    vmin=-1, vmax=1
+)
+
+apply_enhanced_style(ax1, 
+                     "CORRELATION MATRIX", 
+                     "CORRELATION COEFFICIENT")
+add_enhanced_annotations(ax1, corr_matrix, p_value_matrix, color_scheme='color')
+# Add figure border
+fig1.patch.set_linewidth(5)
+fig1.patch.set_edgecolor('black')
+fig1.savefig(
+    os.path.join(output_dir, "Correlation_Heatmap_Enhanced_Color.png"),
+    dpi=300,
+    bbox_inches='tight',
+    facecolor='white',
+    edgecolor='black',
+    pad_inches=0.2
+)
+
+fig2, ax2 = plt.subplots(figsize=(13, 11), dpi=300, 
+                         constrained_layout=True,
+                         facecolor='white',
+                         edgecolor='black',
+                         linewidth=5)
+heatmap2 = sns.heatmap(
+    corr_matrix,
+    ax=ax2,
+    annot=False,
+    cmap=seq_cmap,
+    square=True,
+    linewidths=1.2,
+    linecolor='black',  # Black cell borders
+    cbar_kws={
+        'shrink': 0.85,
+        'label': 'Pearson Correlation Coefficient',
+        'pad': 0.03
+    }
+)
+apply_enhanced_style(ax2, 
+                     "CORRELATION MATRIX: HYDROGEN Desorption Weight", 
+                     "CORRELATION COEFFICIENT")
+add_enhanced_annotations(ax2, corr_matrix, p_value_matrix, color_scheme='grayscale')
+fig2.patch.set_linewidth(5)
+fig2.patch.set_edgecolor('black')
+fig2.savefig(
+    os.path.join(output_dir, "Correlation_Heatmap_Enhanced_BW.png"),
+    dpi=300,
+    bbox_inches='tight',
+    facecolor='white',
+    edgecolor='black',
+    pad_inches=0.2
+)
+fig3, ax3 = plt.subplots(figsize=(12, 10), dpi=300, 
+                         constrained_layout=True,
+                         facecolor='white',
+                         edgecolor='black',
+                         linewidth=6)  # Even thicker border
+heatmap3 = sns.heatmap(
+    corr_matrix,
+    ax=ax3,
+    annot=False,
+    cmap='RdBu_r',
+    center=0,
+    square=True,
+    linewidths=1.5,  # Thickest cell borders
+    linecolor='black',
+    cbar_kws={
+        'shrink': 0.8,
+        'label': 'CORRELATION',
+        'pad': 0.02
+    },
+    vmin=-1, vmax=1
+)
+
+ax3.set_title("HYDROGEN Desorption Weight - CORRELATION ANALYSIS", 
+              fontsize=24, fontweight='black', pad=30, color='black')
+cbar3 = ax3.collections[0].colorbar
+cbar3.set_label('PEARSON CORRELATION COEFFICIENT', 
+                fontsize=18, fontweight='black', labelpad=20)
+cbar3.ax.tick_params(labelsize=16, width=3, colors='black')
+cbar3.outline.set_linewidth(4)
+cbar3.outline.set_edgecolor('black')
+plt.setp(ax3.get_xticklabels(), rotation=45, ha='right', 
+         rotation_mode='anchor', fontsize=15, fontweight='black')
+plt.setp(ax3.get_yticklabels(), fontsize=15, fontweight='black')
+for spine in ax3.spines.values():
+    spine.set_linewidth(5)
+    spine.set_color('black')
+rect3 = Rectangle((0, 0), 1, 1, transform=ax3.transAxes,
+                  linewidth=6, edgecolor='black', facecolor='none')
+ax3.add_patch(rect3)
+for i in range(corr_matrix.shape[0]):
+    for j in range(corr_matrix.shape[1]):
+        corr = corr_matrix.iloc[i, j]
+        txt_color = 'white' if abs(corr) > 0.6 else 'black'
+        
+        ax3.text(
+            j + 0.5, i + 0.5,
+            f"{corr:.2f}",
+            ha="center", va="center",
+            fontsize=16,
+            fontweight='black',
+            color=txt_color
+        )
+fig3.patch.set_linewidth(6)
+fig3.patch.set_edgecolor('black')
+fig3.savefig(
+    os.path.join(output_dir, "Correlation_Heatmap_Bold_Borders.png"),
+    dpi=300,
+    bbox_inches='tight',
+    facecolor='white',
+    edgecolor='black',
+    pad_inches=0.3
+)
+
+print("="*70)
+print("ENHANCED HEATMAP GENERATION COMPLETE")
+print(f"Output saved to: {output_dir}")
+print("\nFiles created (ALL WITH BLACK BORDERS AND BOLD TEXT):")
+print("  1. Correlation_Heatmap_Enhanced_Color.png")
+print("  2. Correlation_Heatmap_Enhanced_BW.png")
+print("  3. Correlation_Heatmap_Bold_Borders.png")
+print("\nENHANCEMENTS APPLIED:")
+print("  • Black borders around entire figure")
+print("  • Black cell borders")
+print("  • Bold text throughout")
+print("  • Larger font sizes")
+print("  • Thicker axis lines")
+print("="*70)
+plt.show()
