@@ -1,3 +1,9 @@
+"""
+Correlation Matrix (Pearson)
+Authors: Arindam Roy & Shubhabrata Datta
+Affiliation: Department of Mechanical Engineering, SRM Institute of Science and Technology, India
+Contact: ar4745@srmist.edu.in / royarindam160@gmail.com
+"""
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -6,7 +12,6 @@ from scipy.stats import pearsonr
 import os
 from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.patches import Rectangle
-
 
 plt.rcParams['font.family'] = 'Arial'
 plt.rcParams['font.weight'] = 'bold'  # Make all text bold
@@ -296,3 +301,4 @@ print("  • Thicker axis lines")
 print("="*70)
 
 plt.show()
+
