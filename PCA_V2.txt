@@ -7,78 +7,48 @@ from sklearn.preprocessing import StandardScaler
 from scipy.stats import bartlett
 from adjustText import adjust_text
 import os
-
-# Create download folder if it doesn't exist
-download_folder = "C:/Users/admin/Downloads/PCA_Analysis_Results/PCA_4"
+download_folder = ""
 if not os.path.exists(download_folder):
     os.makedirs(download_folder)
     print(f"Created download folder: {download_folder}")
-
-# Load data
-file_path = "C:/Users/admin/Downloads/Final Data/Dataset_4.csv"
+file_path = ""
 data = pd.read_csv(file_path)
-
-# Define required columns
-required_columns = ['Ni', 'Si', 'Y', 'La', 'Ce', 'Pr', 'Sm', 'Milling Time', 'Des. Pressure', 'Des. Temperature', 'Hydrogen Des. Weight (%)']
-
-# Normalize data
+required_columns = ['']
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(data[required_columns])
-
-# Perform PCA
 pca = PCA()
 X_pca = pca.fit_transform(X_scaled)
 explained_variance = np.round(pca.explained_variance_ratio_ * 100, 4)
-
-# Save PCA results
 loadings = pd.DataFrame(pca.components_.T, columns=[f"PC{i+1}" for i in range(len(required_columns))], index=required_columns)
 loadings.to_csv(f"{download_folder}/PCA_Loadings.csv")
 
 score_data = pd.DataFrame(X_pca, columns=[f"PC{i+1} ({explained_variance[i]:.4f}%)" for i in range(X_pca.shape[1])])
 score_data.to_csv(f"{download_folder}/Score_Data.csv", index=False)
-
-# Save eigenvalues and eigenvectors
 pd.DataFrame({'Eigenvalues': np.round(pca.explained_variance_, 4)}).to_csv(f"{download_folder}/Eigenvalues.csv", index=False)
 eigenvectors_df = pd.DataFrame(np.round(pca.components_, 4), columns=required_columns, index=[f"PC{i+1}" for i in range(len(required_columns))])
 eigenvectors_df.to_csv(f"{download_folder}/Eigenvectors.csv")
-
-# Bartlett's Test for Sphericity
 bartlett_stat, bartlett_p = bartlett(*[data[col] for col in required_columns])
 bartlett_results = pd.DataFrame({'Test Statistic': [bartlett_stat], 'p-value': [bartlett_p]})
 bartlett_results.to_csv(f"{download_folder}/Bartlett_Test.csv", index=False)
-
-# Print Bartlett's Test Results
 print("\nBartlett's Test for Sphericity:")
 print(bartlett_results)
-
-# Print Eigenvalues and Rankings
 print("\nEigenvalues:")
 print(np.round(pca.explained_variance_, 4))
 print("\nEigenvectors:")
 print(eigenvectors_df)
-
-# Rank PCs with explained variance
 print("\nRank of Principal Components (with explained variance percentage):")
 sorted_indices = np.argsort(-explained_variance)
 for rank, idx in enumerate(sorted_indices, 1):
     print(f"Rank {rank}: PC{idx+1} ({explained_variance[idx]:.4f}%) - {required_columns[idx]}")
-
-# Print PCA Equations
 print("\nPCA Equations:")
 for i in range(len(required_columns)):
     equation = " + ".join([f"({pca.components_[i, j]:.4f} * {required_columns[j]})" for j in range(len(required_columns))])
     print(f"PC{i+1} = {equation}")
-
-# Print Normalization Information
 print("\nNormalization Information:")
 print("Data was standardized using StandardScaler (z-score normalization)")
 print("Each variable was transformed to have mean = 0 and standard deviation = 1")
-
-# Set a professional color palette
 colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', 
           '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#393b79']
-
-# Explained Variance Bar Plot (Color version)
 plt.figure(figsize=(12, 10))
 bars = plt.bar(range(1, len(required_columns) + 1), explained_variance, 
                tick_label=required_columns, color=colors[:len(required_columns)], alpha=0.8)
@@ -90,8 +60,6 @@ plt.tight_layout()
 plt.savefig(f"{download_folder}/Explained_Variance_Color.png", dpi=600)
 plt.show()
 
-
-# Function to draw text with semi-transparent background
 def annotate_with_bg(ax, x, y, text, fontsize=14, fontweight='bold', text_color='black'):
     return ax.annotate(
         text,
@@ -101,8 +69,6 @@ def annotate_with_bg(ax, x, y, text, fontsize=14, fontweight='bold', text_color=
         color=text_color,
         bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="black", alpha=0.8)
     )
-
-# Biplot for PC1 vs PC2 (Color version)
 fig, ax = plt.subplots(figsize=(14, 10), dpi=600)
 scatter = ax.scatter(X_pca[:, 0], X_pca[:, 1], alpha=0.7, color=colors[0], s=100, edgecolors='black', linewidth=0.5)
 texts = []
@@ -121,15 +87,10 @@ ax.set_xlabel(f"PC1 ({explained_variance[0]:.2f}%)", fontsize=22, fontweight='bo
 ax.set_ylabel(f"PC2 ({explained_variance[1]:.2f}%)", fontsize=22, fontweight='bold')
 ax.set_title("PCA Biplot: PC1 vs PC2 Hydrogen Sorption", fontsize=24, fontweight='bold')
 ax.tick_params(axis='both', labelsize=25)
-
-# Add grid for better readability
 ax.grid(True, linestyle='--', alpha=0.3)
-
 plt.tight_layout()
 plt.savefig(f"{download_folder}/Biplot_PC1_PC2_Color.png", dpi=600, bbox_inches='tight')
 plt.show()
-
-# Biplot for PC1 vs PC2 (B&W version)
 fig, ax = plt.subplots(figsize=(14, 10), dpi=300)
 scatter = ax.scatter(X_pca[:, 0], X_pca[:, 1], alpha=0.7, color='gray', s=100, edgecolors='black', linewidth=0.5)
 texts = []
@@ -140,7 +101,6 @@ for i in range(len(required_columns)):
     ax.scatter(arrow_x, arrow_y, color='white', s=120, alpha=1.0, edgecolors='black', linewidth=1.5)
     text = annotate_with_bg(ax, arrow_x, arrow_y, required_columns[i], fontsize=20)
     texts.append(text)
-
 adjust_text(texts, ax=ax, arrowprops=dict(arrowstyle='->', color='black', lw=3),
             force_points=0.2, force_text=0.2, expand_text=(1.05, 1.05), expand_points=(1.1, 1.1))
 
@@ -148,15 +108,11 @@ ax.set_xlabel(f"PC1 ({explained_variance[0]:.2f}%)", fontsize=22, fontweight='bo
 ax.set_ylabel(f"PC2 ({explained_variance[1]:.2f}%)", fontsize=22, fontweight='bold')
 ax.set_title("PCA Biplot: PC1 vs PC2 Hydrogen Sorption", fontsize=24, fontweight='bold')
 ax.tick_params(axis='both', labelsize=25)
-
-# Add grid for better readability
 ax.grid(True, linestyle='--', alpha=0.3)
 
 plt.tight_layout()
 plt.savefig(f"{download_folder}/Biplot_PC1_PC2_BW.png", dpi=300, bbox_inches='tight')
 plt.show()
-
-# Biplot for PC1 vs PC3 (Color version)
 fig, ax = plt.subplots(figsize=(14, 10), dpi=600)
 scatter = ax.scatter(X_pca[:, 0], X_pca[:, 2], alpha=0.7, color=colors[2], s=100, edgecolors='black', linewidth=0.5)
 texts = []
@@ -167,23 +123,16 @@ for i in range(len(required_columns)):
     ax.scatter(arrow_x, arrow_y, color=colors[i % len(colors)], s=120, alpha=0.8, edgecolors='black')
     text = annotate_with_bg(ax, arrow_x, arrow_y, required_columns[i], fontsize=20)
     texts.append(text)
-
 adjust_text(texts, ax=ax, arrowprops=dict(arrowstyle='->', color='black', lw=3),
             force_points=0.2, force_text=0.2, expand_text=(1.05, 1.05), expand_points=(1.1, 1.1))
-
 ax.set_xlabel(f"PC1 ({explained_variance[0]:.2f}%)", fontsize=22, fontweight='bold')
 ax.set_ylabel(f"PC3 ({explained_variance[2]:.2f}%)", fontsize=22, fontweight='bold')
 ax.set_title("PCA Biplot: PC1 vs PC3 Hydrogen Sorption", fontsize=24, fontweight='bold')
 ax.tick_params(axis='both', labelsize=14)
-
-# Add grid for better readability
 ax.grid(True, linestyle='--', alpha=0.3)
-
 plt.tight_layout()
 plt.savefig(f"{download_folder}/Biplot_PC1_PC3_Color.png", dpi=300, bbox_inches='tight')
 plt.show()
-
-# Create scree plot (Color version)
 plt.figure(figsize=(12, 7))
 plt.plot(range(1, len(explained_variance)+1), explained_variance, 'o-', 
          color=colors[0], linewidth=3, markersize=8, markerfacecolor=colors[1], markeredgecolor='black')
@@ -195,9 +144,6 @@ plt.grid(True, linestyle='--', alpha=0.3)
 plt.tight_layout()
 plt.savefig(f"{download_folder}/Scree_Plot_Color.png", dpi=300)
 plt.show()
-
-
-# Create cumulative explained variance plot
 cumulative_variance = np.cumsum(explained_variance)
 plt.figure(figsize=(12, 7))
 plt.plot(range(1, len(cumulative_variance)+1), cumulative_variance, 's-', 
