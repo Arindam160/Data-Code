@@ -1,0 +1,614 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+NSGA-II
+@adopted Arindam Roy, SHubhabrata Datta
+Credit: Kalyanmoy Deb
+"""
+
+import os
+import pickle
+import math
+import shutil
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from datetime import datetime
+from typing import List, Dict, Tuple, Optional
+import logging
+from joblib import Parallel, delayed
+from pymoo.core.problem import Problem
+from pymoo.algorithms.moo.nsga2 import NSGA2
+from pymoo.termination import get_termination
+from pymoo.optimize import minimize
+from pymoo.operators.sampling.rnd import FloatRandomSampling
+from pymoo.operators.crossover.sbx import SBX
+from pymoo.operators.mutation.pm import PM
+from pymoo.util.nds.non_dominated_sorting import NonDominatedSorting
+
+try:
+    from pymoo.factory import get_performance_indicator
+    HV_AVAILABLE = True
+except Exception:
+    HV_AVAILABLE = False
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('nsga2_optimization.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+# Save path - update as needed
+SAVE_PATH = r"C:\Users\Admin\Downloads\SVR_NSGA_II_(1&2)"
+os.makedirs(SAVE_PATH, exist_ok=True)
+SEED_BASE = 42
+POP_SIZE = 1000
+MAX_GEN = 500
+CROSSOVER_RATE = 0.9
+MUTATION_RATE = 0.1
+N_RUNS = 5
+
+N_JOBS = 1  # Set to >1 for parallel processing (e.g., -1 for all cores)
+VAR_NAMES = [
+    "Ni", "Si", "La", "Y", "Ce", "Pr", "Sm", "Milling Time",
+    "Abs. Pressure", "Abs. Temp"
+]
+
+BOUNDS = {
+    "Ni": (0, 10), 
+    "Si": (0, 5), 
+    "La": (0, 7), 
+    "Y": (0, 5),
+    "Ce": (0, 5), 
+    "Pr": (0, 3), 
+    "Sm": (0, 3), 
+    "Milling Time": (0, 30),
+    "Abs. Pressure": (20, 35),      # Uncommented for Absorption
+    "Abs. Temp": (100, 360)         # Uncommented for Absorption
+}
+
+for var in VAR_NAMES:
+    if var not in BOUNDS:
+        raise ValueError(f"Variable '{var}' not found in BOUNDS dictionary. "
+                        f"Available bounds: {list(BOUNDS.keys())}")
+
+LOWER_BOUNDS = [BOUNDS[v][0] for v in VAR_NAMES]
+UPPER_BOUNDS = [BOUNDS[v][1] for v in VAR_NAMES]
+OBJECTIVE_DIRECTIONS = ["min", "max"]  # Example: Obj1 minimize, Obj2 maximize
+model_paths = [
+    r"G:/Working Model/Alloying/SVR/SVR_1/SVR_RBF_Model.pkl",
+    r"G:/Working Model/Alloying/SVR/SVR_2/SVR_RBF_Model.pkl",
+]
+x_scaler_paths = [
+    r"G:/Working Model/Alloying/SVR/SVR_1/Scaler_X.pkl",
+    r"G:/Working Model/Alloying/SVR/SVR_2/Scaler_X.pkl",
+]
+y_scaler_paths = [
+    r"G:/Working Model/Alloying/SVR/SVR_1/Scaler_Y.pkl",
+    r"G:/Working Model/Alloying/SVR/SVR_2/Scaler_Y.pkl",
+]
+def validate_config():
+    """Validate all configuration parameters before running."""
+    assert len(VAR_NAMES) == len(LOWER_BOUNDS) == len(UPPER_BOUNDS), \
+        f"Variable names and bounds mismatch: {len(VAR_NAMES)} vars, {len(LOWER_BOUNDS)} lower bounds, {len(UPPER_BOUNDS)} upper bounds"
+    assert len(model_paths) == len(OBJECTIVE_DIRECTIONS), \
+        f"Number of models ({len(model_paths)}) and objectives ({len(OBJECTIVE_DIRECTIONS)}) mismatch"
+    assert all(d in ["min", "max"] for d in OBJECTIVE_DIRECTIONS), \
+        f"Invalid objective direction. Must be 'min' or 'max', got {OBJECTIVE_DIRECTIONS}"
+    assert POP_SIZE > 0, "Population size must be positive"
+    assert MAX_GEN > 0, "Maximum generations must be positive"
+    assert os.path.exists(SAVE_PATH), f"Save path does not exist: {SAVE_PATH}"
+    
+    # Validate model files exist
+    for path in model_paths + x_scaler_paths + y_scaler_paths:
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"File not found: {path}")
+    
+    logger.info("✅ Configuration validation passed")
+
+def sanitize_filename(fname: str) -> str:
+    """Make a filename safe by replacing problematic characters."""
+    return "".join(c if c.isalnum() or c in " ._-()" else "_" for c in fname)
+
+def load_pickle_file(path: str):
+    """Load pickle file with error handling and support for different formats."""
+    try:
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"File not found: {path}")
+        with open(path, "rb") as f:
+            data = pickle.load(f)
+        
+        # Handle different pickle formats
+        if isinstance(data, dict):
+            if "model" in data:
+                logger.debug(f"Loaded model from dictionary: {path}")
+                return data["model"]
+            elif "scaler" in data:
+                logger.debug(f"Loaded scaler from dictionary: {path}")
+                return data["scaler"]
+        logger.debug(f"Loaded data from {path}")
+        return data
+    except Exception as e:
+        logger.error(f"Error loading {path}: {e}")
+        raise
+
+def ensure_lengths_match(models, x_scalers, y_scalers):
+    """Ensure all model-related lists have the same length."""
+    if len(models) != len(x_scalers) or len(models) != len(y_scalers):
+        raise ValueError(f"Models and scaler lists must be same length. Got {len(models)} models, {len(x_scalers)} x_scalers, {len(y_scalers)} y_scalers")
+    logger.info(f"Successfully validated {len(models)} model-scaler pairs")
+class ModelCache:
+    """Cache for loaded models to avoid redundant loading."""
+    def __init__(self):
+        self._models = {}
+        self._x_scalers = {}
+        self._y_scalers = {}
+    
+    def get_model(self, path: str):
+        if path not in self._models:
+            self._models[path] = load_pickle_file(path)
+        return self._models[path]
+    
+    def get_x_scaler(self, path: str):
+        if path not in self._x_scalers:
+            self._x_scalers[path] = load_pickle_file(path)
+        return self._x_scalers[path]
+    
+    def get_y_scaler(self, path: str):
+        if path not in self._y_scalers:
+            self._y_scalers[path] = load_pickle_file(path)
+        return self._y_scalers[path]
+validate_config()
+
+model_cache = ModelCache()
+models = []
+x_scalers = []
+y_scalers = []
+
+logger.info("Loading models and scalers...")
+for i in range(len(model_paths)):
+    logger.info(f"  Loading model {i+1}/{len(model_paths)}: {os.path.basename(model_paths[i])}")
+    models.append(model_cache.get_model(model_paths[i]))
+    x_scalers.append(model_cache.get_x_scaler(x_scaler_paths[i]))
+    y_scalers.append(model_cache.get_y_scaler(y_scaler_paths[i]))
+
+ensure_lengths_match(models, x_scalers, y_scalers)
+N_OBJS = len(models)
+logger.info(f"✅ Loaded {N_OBJS} models and scalers successfully.")
+logger.info(f"Variables: {VAR_NAMES}")
+logger.info(f"Bounds: {list(zip(VAR_NAMES, LOWER_BOUNDS, UPPER_BOUNDS))}")
+logger.info(f"Objective directions: {OBJECTIVE_DIRECTIONS}")
+
+input_indices = list(range(len(VAR_NAMES)))  # indices of model inputs in X
+class MultiObjectiveModelProblem(Problem):
+    """
+    PyMOO Problem that predicts N_OBJS outputs using provided models/scalers.
+    Expects X as shape (n_individuals, n_vars).
+    Outputs F shape (n_individuals, N_OBJS) with sign-flipped values for 'max' objectives
+    to conform to pymoo's minimization convention.
+    """
+    def __init__(self, models, x_scalers, y_scalers, objective_directions, n_jobs=1):
+        super().__init__(
+            n_var=len(VAR_NAMES),
+            n_obj=N_OBJS,
+            n_constr=0,
+            xl=np.array(LOWER_BOUNDS, dtype=float),
+            xu=np.array(UPPER_BOUNDS, dtype=float),
+            elementwise_evaluation=False
+        )
+        self.models = models
+        self.x_scalers = x_scalers
+        self.y_scalers = y_scalers
+        self.objective_directions = objective_directions
+        self.n_jobs = n_jobs
+        
+    def _evaluate_single_objective(self, X, obj_idx):
+        """Evaluate a single objective for all individuals."""
+        X_for_model = X[:, input_indices]
+        X_scaled = self.x_scalers[obj_idx].transform(X_for_model)
+        y_scaled_pred = self.models[obj_idx].predict(X_scaled)
+        y_scaled_pred = np.array(y_scaled_pred).reshape(-1, 1)
+        try:
+            y_pred = self.y_scalers[obj_idx].inverse_transform(y_scaled_pred).flatten()
+        except Exception:
+            y_pred = y_scaled_pred.flatten()
+        y_pred = np.clip(y_pred, 0, None)
+        if self.objective_directions[obj_idx] == "max":
+            y_pred = -y_pred
+            
+        return y_pred
+    
+    def _evaluate(self, X, out, *args, **kwargs):
+        """
+        Vectorized batch evaluation.
+        X: (n_individuals, n_var)
+        """
+        if self.n_jobs > 1:
+            # Parallel evaluation
+            results = Parallel(n_jobs=self.n_jobs)(
+                delayed(self._evaluate_single_objective)(X, i) 
+                for i in range(N_OBJS)
+            )
+            preds_all = list(results)
+        else:
+            preds_all = []
+            for i in range(N_OBJS):
+                preds_all.append(self._evaluate_single_objective(X, i))
+        out["F"] = np.column_stack(preds_all)
+
+def calculate_hypervolume(F, ref_point_factor=1.1):
+    """Calculate hypervolume for a set of points."""
+    if not HV_AVAILABLE or len(F) == 0:
+        return None
+    
+    try:
+        # Calculate reference point
+        ref_point = np.max(F, axis=0) * ref_point_factor + 1e-6
+        hv = get_performance_indicator("hv", ref_point=ref_point)
+        return hv(F)
+    except Exception as e:
+        logger.warning(f"Hypervolume calculation failed: {e}")
+        return None
+
+def calculate_spread(F):
+    """Calculate spread (diversity) metric for a Pareto front."""
+    if len(F) < 2:
+        return 0.0
+    try:
+        return float(np.mean(np.std(F, axis=0)))
+    except Exception as e:
+        logger.warning(f"Spread calculation failed: {e}")
+        return 0.0
+
+def save_checkpoint(res, run, checkpoint_dir, generation):
+    """Save optimization checkpoint."""
+    try:
+        checkpoint = {
+            'run': run,
+            'generation': generation,
+            'X': res.X if hasattr(res, 'X') else None,
+            'F': res.F if hasattr(res, 'F') else None,
+            'algorithm_state': res.algorithm.__dict__ if hasattr(res, 'algorithm') and res.algorithm else None,
+            'timestamp': datetime.now().isoformat()
+        }
+        checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_run{run}_gen{generation}.pkl")
+        with open(checkpoint_path, 'wb') as f:
+            pickle.dump(checkpoint, f)
+        logger.debug(f"Saved checkpoint: {checkpoint_path}")
+    except Exception as e:
+        logger.warning(f"Failed to save checkpoint: {e}")
+all_runs_pareto = []  # store (X, F) for each run's Pareto front
+summary_rows = []
+convergence_history = []  # Track convergence across runs
+
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+run_folder_base = os.path.join(SAVE_PATH, f"nsga2_runs_{timestamp}")
+os.makedirs(run_folder_base, exist_ok=True)
+config_info = {
+    'timestamp': timestamp,
+    'pop_size': POP_SIZE,
+    'max_gen': MAX_GEN,
+    'crossover_rate': CROSSOVER_RATE,
+    'mutation_rate': MUTATION_RATE,
+    'n_runs': N_RUNS,
+    'n_objs': N_OBJS,
+    'objective_directions': OBJECTIVE_DIRECTIONS,
+    'var_names': VAR_NAMES,
+    'bounds': BOUNDS,
+    'model_paths': model_paths
+}
+config_df = pd.DataFrame([config_info])
+config_df.to_csv(os.path.join(run_folder_base, "configuration.csv"), index=False)
+logger.info(f"Saved configuration to {run_folder_base}")
+
+for run in range(1, N_RUNS + 1):
+    run_seed = SEED_BASE + run
+    logger.info(f"\n===== Run {run}/{N_RUNS} (seed={run_seed}) =====")
+
+    problem = MultiObjectiveModelProblem(
+        models, x_scalers, y_scalers, 
+        OBJECTIVE_DIRECTIONS, 
+        n_jobs=N_JOBS
+    )
+
+    algorithm = NSGA2(
+        pop_size=POP_SIZE,
+        sampling=FloatRandomSampling(),
+        crossover=SBX(prob=CROSSOVER_RATE, eta=20),
+        mutation=PM(prob=MUTATION_RATE, eta=20),
+        eliminate_duplicates=True
+    )
+
+    termination = get_termination("n_gen", MAX_GEN)
+    run_dir = os.path.join(run_folder_base, f"run_{run}")
+    os.makedirs(run_dir, exist_ok=True)
+    res = minimize(
+        problem,
+        algorithm,
+        termination,
+        seed=run_seed,
+        verbose=True,
+        callback=lambda algo: save_checkpoint(
+            algo.pop, run, run_dir, algo.n_gen
+        ) if algo.n_gen % 10 == 0 else None  # Save every 10 generations
+    )
+
+    if res.F is None or res.X is None:
+        logger.error(f"❌ No feasible solution found in run {run}. Skipping.")
+        continue
+    nds_idx = NonDominatedSorting().do(res.F, only_non_dominated_front=True)
+    pareto_F = res.F[nds_idx].copy()
+    pareto_X = res.X[nds_idx].copy()
+    reported_F = pareto_F.copy()
+    for i, direction in enumerate(OBJECTIVE_DIRECTIONS):
+        if direction == "max":
+            reported_F[:, i] *= -1
+    sort_idx = np.argsort(reported_F[:, 0], kind="stable")
+    reported_F = reported_F[sort_idx]
+    pareto_X = pareto_X[sort_idx]
+    df = pd.DataFrame(pareto_X, columns=VAR_NAMES)
+    for i in range(N_OBJS):
+        df[f"Objective_{i+1}"] = reported_F[:, i]
+    csv_path = os.path.join(run_dir, sanitize_filename(f"Ordered_Pareto_Run{run}.csv"))
+    df.to_csv(csv_path, index=False)
+    logger.info(f"✅ Saved ordered Pareto CSV: {csv_path}")
+    hv_value = calculate_hypervolume(pareto_F)
+    spread_value = calculate_spread(reported_F)
+    summary_rows.append({
+        "run": run,
+        "seed": run_seed,
+        "n_pareto": reported_F.shape[0],
+        "hv": hv_value,
+        "spread": spread_value,
+        "csv": csv_path
+    })
+    plt.figure(figsize=(10, 8))
+    if N_OBJS >= 2:
+        plt.scatter(reported_F[:, 0], reported_F[:, 1], s=30, alpha=0.8, c='blue', edgecolors='black', linewidth=0.5)
+        xlab = f"Objective_1 ({OBJECTIVE_DIRECTIONS[0]})"
+        ylab = f"Objective_2 ({OBJECTIVE_DIRECTIONS[1]})"
+        plt.xlabel(xlab, fontsize=12)
+        plt.ylabel(ylab, fontsize=12)
+        if len(reported_F) > 100:
+            try:
+                from scipy.stats import gaussian_kde
+                xy = np.vstack([reported_F[:, 0], reported_F[:, 1]])
+                z = gaussian_kde(xy)(xy)
+                plt.scatter(reported_F[:, 0], reported_F[:, 1], c=z, s=30, cmap='viridis', edgecolors='black', linewidth=0.5)
+                plt.colorbar(label='Density')
+            except ImportError:
+                pass  # scipy not available, skip density plot
+    else:
+        plt.scatter(range(reported_F.shape[0]), reported_F[:, 0], s=30, alpha=0.8)
+        plt.xlabel("Pareto Index", fontsize=12)
+        plt.ylabel("Objective_1", fontsize=12)
+
+    plt.title(f"Pareto Front - Run {run}", fontsize=14, fontweight='bold')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    pareto_plot_path = os.path.join(run_dir, sanitize_filename(f"Pareto_Run{run}.png"))
+    plt.savefig(pareto_plot_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    logger.info(f"✅ Saved Pareto plot: {pareto_plot_path}")
+    pc_df = pd.DataFrame(pareto_X, columns=VAR_NAMES)
+    for i in range(N_OBJS):
+        pc_df[f"Objective_{i+1}"] = reported_F[:, i]
+    pc_norm = (pc_df - pc_df.min()) / (pc_df.max() - pc_df.min() + 1e-12)
+    pc_norm["Index"] = [str(i) for i in range(pc_norm.shape[0])]
+
+    try:
+        from pandas.plotting import parallel_coordinates
+        plt.figure(figsize=(14, 8))
+        parallel_coordinates(pc_norm, "Index", linewidth=0.5, alpha=0.7, colormap='viridis')
+        plt.title(f"Parallel Coordinates (vars + objectives) - Run {run}", fontsize=14, fontweight='bold')
+        plt.ylabel("Normalized value", fontsize=12)
+        plt.xticks(rotation=45, ha='right')
+        plt.legend([], [], frameon=False)
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        pc_path = os.path.join(run_dir, sanitize_filename(f"ParallelCoordinates_Run{run}.png"))
+        plt.savefig(pc_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        logger.info(f"✅ Saved parallel coordinates plot: {pc_path}")
+    except Exception as e:
+        logger.warning(f"Parallel coordinates plotting failed: {e}")
+    delta_fraction = 0.05  # 5%
+    importance_matrix = np.zeros((len(VAR_NAMES), N_OBJS))
+    baseline = np.mean(reported_F, axis=0)
+
+    for j, var in enumerate(VAR_NAMES):
+        lower = LOWER_BOUNDS[j]
+        upper = UPPER_BOUNDS[j]
+        step = (upper - lower) * delta_fraction
+        pert_plus = pareto_X.copy()
+        pert_plus[:, j] = np.clip(pert_plus[:, j] + step, lower, upper)
+        pert_minus = pareto_X.copy()
+        pert_minus[:, j] = np.clip(pert_minus[:, j] - step, lower, upper)
+
+        impacts = []
+        for i in range(N_OBJS):
+            # Evaluate for plus perturbation
+            Xs = pert_plus[:, input_indices]
+            Xs_scaled = x_scalers[i].transform(Xs)
+            y_plus_s = models[i].predict(Xs_scaled).reshape(-1, 1)
+            try:
+                y_plus = y_scalers[i].inverse_transform(y_plus_s).flatten()
+            except Exception:
+                y_plus = np.array(y_plus_s).flatten()
+            y_plus = np.clip(y_plus, 0, None)
+            Xs = pert_minus[:, input_indices]
+            Xs_scaled = x_scalers[i].transform(Xs)
+            y_minus_s = models[i].predict(Xs_scaled).reshape(-1, 1)
+            try:
+                y_minus = y_scalers[i].inverse_transform(y_minus_s).flatten()
+            except Exception:
+                y_minus = np.array(y_minus_s).flatten()
+            y_minus = np.clip(y_minus, 0, None)
+            if OBJECTIVE_DIRECTIONS[i] == "max":
+                y_plus = -y_plus
+                y_minus = -y_minus
+            impact_val = 0.5 * (abs(np.mean(y_plus) - baseline[i]) + abs(np.mean(y_minus) - baseline[i]))
+            impacts.append(impact_val)
+        
+        importance_matrix[j] = impacts
+
+    importance_df = pd.DataFrame(
+        importance_matrix, 
+        columns=[f"Obj{i+1}_Impact" for i in range(N_OBJS)], 
+        index=VAR_NAMES
+    )
+    
+    importance_csv = os.path.join(run_dir, sanitize_filename(f"FeatureImportance_Run{run}.csv"))
+    importance_df.to_csv(importance_csv)
+    fig, ax = plt.subplots(figsize=(12, 6))
+    importance_df.plot(kind="bar", ax=ax, colormap='viridis')
+    ax.set_title(f"Feature Importance (mean absolute change) - Run {run}", fontsize=14, fontweight='bold')
+    ax.set_ylabel("Mean absolute change in objective", fontsize=12)
+    ax.set_xlabel("Features", fontsize=12)
+    ax.legend(loc='best', fontsize=10)
+    plt.xticks(rotation=45, ha='right')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    importance_png = os.path.join(run_dir, sanitize_filename(f"FeatureImportance_Run{run}.png"))
+    plt.savefig(importance_png, dpi=300, bbox_inches='tight')
+    plt.close()
+    logger.info(f"✅ Saved feature importance CSV & plot: {importance_csv} , {importance_png}")
+    all_runs_pareto.append((pareto_X.copy(), reported_F.copy(), run_dir))
+if len(all_runs_pareto) == 0:
+    raise RuntimeError("No Pareto solutions were found across all runs.")
+
+logger.info("\n" + "="*60)
+logger.info("Merging Pareto fronts from all runs...")
+Xs_all = np.vstack([r[0] for r in all_runs_pareto])
+Fs_all = np.vstack([r[1] for r in all_runs_pareto])
+Fs_for_nds = Fs_all.copy()
+for i, direction in enumerate(OBJECTIVE_DIRECTIONS):
+    if direction == "max":
+        Fs_for_nds[:, i] *= -1
+
+global_nds_idx = NonDominatedSorting().do(Fs_for_nds, only_non_dominated_front=True)
+global_pareto_X = Xs_all[global_nds_idx]
+global_pareto_F = Fs_all[global_nds_idx]
+sort_idx = np.argsort(global_pareto_F[:, 0], kind="stable")
+global_pareto_X = global_pareto_X[sort_idx]
+global_pareto_F = global_pareto_F[sort_idx]
+
+logger.info(f"Global Pareto front size: {len(global_pareto_F)} (from {len(Fs_all)} total solutions)")
+global_df = pd.DataFrame(global_pareto_X, columns=VAR_NAMES)
+for i in range(N_OBJS):
+    global_df[f"Objective_{i+1}"] = global_pareto_F[:, i]
+global_csv = os.path.join(run_folder_base, sanitize_filename("Global_Ordered_Pareto_AllRuns.csv"))
+global_df.to_csv(global_csv, index=False)
+logger.info(f"✅ Saved global ordered Pareto across runs: {global_csv}")
+plt.figure(figsize=(12, 8))
+if N_OBJS >= 2:
+    plt.scatter(Fs_all[:, 0], Fs_all[:, 1], s=20, alpha=0.3, c='lightgray', label='All solutions')
+    plt.scatter(global_pareto_F[:, 0], global_pareto_F[:, 1], s=50, alpha=0.9, 
+               c='red', edgecolors='black', linewidth=0.5, label='Global Pareto front')
+    plt.xlabel(f"Objective_1 ({OBJECTIVE_DIRECTIONS[0]})", fontsize=12)
+    plt.ylabel(f"Objective_2 ({OBJECTIVE_DIRECTIONS[1]})", fontsize=12)
+    plt.legend()
+else:
+    plt.scatter(range(Fs_all.shape[0]), Fs_all[:, 0], s=20, alpha=0.3, c='lightgray')
+    plt.scatter(range(global_pareto_F.shape[0]), global_pareto_F[:, 0], s=50, alpha=0.9, c='red')
+    plt.xlabel("Solution Index", fontsize=12)
+    plt.ylabel("Objective_1", fontsize=12)
+
+plt.title("Global Pareto Front (All Runs)", fontsize=14, fontweight='bold')
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+global_pareto_png = os.path.join(run_folder_base, sanitize_filename("Global_Pareto_AllRuns.png"))
+plt.savefig(global_pareto_png, dpi=300, bbox_inches='tight')
+plt.close()
+logger.info(f"✅ Saved global Pareto plot: {global_pareto_png}")
+logger.info("Calculating global feature importance...")
+global_importance_matrix = np.zeros((len(VAR_NAMES), N_OBJS))
+global_baseline = np.mean(global_pareto_F, axis=0)
+
+for j, var in enumerate(VAR_NAMES):
+    lower = LOWER_BOUNDS[j]
+    upper = UPPER_BOUNDS[j]
+    step = (upper - lower) * delta_fraction
+    
+    pert_plus = global_pareto_X.copy()
+    pert_plus[:, j] = np.clip(pert_plus[:, j] + step, lower, upper)
+    pert_minus = global_pareto_X.copy()
+    pert_minus[:, j] = np.clip(pert_minus[:, j] - step, lower, upper)
+    
+    impacts = []
+    for i in range(N_OBJS):
+        # Plus perturbation
+        Xs = pert_plus[:, input_indices]
+        Xs_scaled = x_scalers[i].transform(Xs)
+        y_plus_s = models[i].predict(Xs_scaled).reshape(-1, 1)
+        try:
+            y_plus = y_scalers[i].inverse_transform(y_plus_s).flatten()
+        except Exception:
+            y_plus = np.array(y_plus_s).flatten()
+        y_plus = np.clip(y_plus, 0, None)
+    
+        Xs = pert_minus[:, input_indices]
+        Xs_scaled = x_scalers[i].transform(Xs)
+        y_minus_s = models[i].predict(Xs_scaled).reshape(-1, 1)
+        try:
+            y_minus = y_scalers[i].inverse_transform(y_minus_s).flatten()
+        except Exception:
+            y_minus = np.array(y_minus_s).flatten()
+        y_minus = np.clip(y_minus, 0, None)
+        
+        if OBJECTIVE_DIRECTIONS[i] == "max":
+            y_plus = -y_plus
+            y_minus = -y_minus
+        
+        impact_val = 0.5 * (abs(np.mean(y_plus) - global_baseline[i]) + 
+                           abs(np.mean(y_minus) - global_baseline[i]))
+        impacts.append(impact_val)
+    
+    global_importance_matrix[j] = impacts
+
+global_importance_df = pd.DataFrame(
+    global_importance_matrix,
+    columns=[f"Obj{i+1}_Impact" for i in range(N_OBJS)],
+    index=VAR_NAMES
+)
+global_importance_csv = os.path.join(run_folder_base, "Global_FeatureImportance.csv")
+global_importance_df.to_csv(global_importance_csv)
+fig, ax = plt.subplots(figsize=(12, 6))
+global_importance_df.plot(kind="bar", ax=ax, colormap='viridis')
+ax.set_title("Global Feature Importance (All Runs)", fontsize=14, fontweight='bold')
+ax.set_ylabel("Mean absolute change in objective", fontsize=12)
+ax.set_xlabel("Features", fontsize=12)
+ax.legend(loc='best', fontsize=10)
+plt.xticks(rotation=45, ha='right')
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+global_importance_png = os.path.join(run_folder_base, "Global_FeatureImportance.png")
+plt.savefig(global_importance_png, dpi=300, bbox_inches='tight')
+plt.close()
+logger.info(f"✅ Saved global feature importance: {global_importance_csv}")
+summary_df = pd.DataFrame(summary_rows)
+summary_csv = os.path.join(run_folder_base, "Runs_Summary.csv")
+summary_df.to_csv(summary_csv, index=False)
+logger.info(f"✅ Saved runs summary CSV: {summary_csv}")
+logger.info("\n" + "="*60)
+logger.info("OPTIMIZATION COMPLETE - SUMMARY")
+logger.info("="*60)
+logger.info(f"Total runs completed: {len(summary_rows)}")
+logger.info(f"Global Pareto front size: {len(global_pareto_F)}")
+logger.info(f"Average Pareto front size: {summary_df['n_pareto'].mean():.1f}")
+if 'hv' in summary_df and summary_df['hv'].notna().any():
+    logger.info(f"Best hypervolume across runs: {summary_df['hv'].max():.4f}")
+else:
+    logger.info("Hypervolume not available")
+logger.info(f"\nOutput folder: {run_folder_base}")
+logger.info("Files saved:")
+logger.info(f"  - Configuration: configuration.csv")
+logger.info(f"  - Run summaries: Runs_Summary.csv")
+logger.info(f"  - Global Pareto: Global_Ordered_Pareto_AllRuns.csv")
+logger.info(f"  - Global feature importance: Global_FeatureImportance.csv")
+logger.info(f"  - Individual run results in subfolders: run_1/, run_2/, etc.")
+
+print(f"\n✅ All runs complete. Outputs are in folder: {run_folder_base}")
