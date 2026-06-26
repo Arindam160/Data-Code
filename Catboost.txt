@@ -1,0 +1,401 @@
+# ===============================
+# CatBoost Regression with Sobol Sensitivity Analysis and Multiple Runs
+# ===============================
+import os
+import pickle
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+from catboost import CatBoostRegressor
+from SALib.sample import saltelli
+from SALib.analyze import sobol
+from scipy.stats import pearsonr
+import warnings
+warnings.filterwarnings('ignore')
+
+# ---------------- PATHS ----------------
+file_path = r'G:/Working Model/Alloying (ternary)/Dataset (ternary)/Ternary_1.csv'
+base_save_path = r'C:/Users/admin/Downloads/TA_CATBOOST/CB_1'
+os.makedirs(base_save_path, exist_ok=True)
+
+# ---------------- LOAD DATA ----------------
+data = pd.read_csv(file_path)
+data.columns = data.columns.str.strip()
+
+X = data[['Ni_atom%', 'M2_AW', 'M2_EN', 'M2_AR', 'M2_Enthal',
+          'M2_Ecoh', 'M2_atom%', 'Milling_Time', 'Abs_Temp.', 'Abs_Pressure']]
+Y = data['Abs. Time']
+
+# ---------------- METRICS ----------------
+def evaluate(y_true, y_pred):
+    mse = mean_squared_error(y_true, y_pred)
+    rmse = np.sqrt(mse)
+    mae = mean_absolute_error(y_true, y_pred)
+    r2 = r2_score(y_true, y_pred) * 100
+    acc = (1 - (mae / np.mean(y_true))) * 100
+    return mse, rmse, mae, r2, acc
+
+# ---------------- TRAIN FUNCTION ----------------
+def train_catboost(run_id, run_path, X_train_scaled, Y_train_scaled, X_test_scaled, Y_test_scaled, 
+                  scaler_Y, iterations=1000, learning_rate=0.05, depth=6, patience=100):
+    
+    # Train model
+    model = CatBoostRegressor(
+        iterations=iterations,
+        learning_rate=learning_rate,
+        depth=depth,
+        loss_function='RMSE',
+        random_seed=42 + run_id,
+        verbose=0
+    )
+    
+    model.fit(X_train_scaled, Y_train_scaled)
+    
+    # Predictions
+    Y_train_pred_scaled = model.predict(X_train_scaled)
+    Y_test_pred_scaled = model.predict(X_test_scaled)
+    
+    # Inverse transform
+    Y_train_pred = scaler_Y.inverse_transform(Y_train_pred_scaled.reshape(-1, 1)).flatten()
+    Y_test_pred = scaler_Y.inverse_transform(Y_test_pred_scaled.reshape(-1, 1)).flatten()
+    Y_train_orig = scaler_Y.inverse_transform(Y_train_scaled.reshape(-1, 1)).flatten()
+    Y_test_orig = scaler_Y.inverse_transform(Y_test_scaled.reshape(-1, 1)).flatten()
+
+    # Metrics
+    train_metrics = evaluate(Y_train_orig, Y_train_pred)
+    test_metrics = evaluate(Y_test_orig, Y_test_pred)
+    
+    # Overall metrics (train + test combined)
+    Y_all_orig = np.concatenate([Y_train_orig, Y_test_orig])
+    Y_all_pred = np.concatenate([Y_train_pred, Y_test_pred])
+    overall_metrics = evaluate(Y_all_orig, Y_all_pred)
+
+    print(f"\n=== Run {run_id} Results ===")
+    print(f"Train -> MSE: {train_metrics[0]:.4f}, RMSE: {train_metrics[1]:.4f}, "
+          f"MAE: {train_metrics[2]:.4f}, R²: {train_metrics[3]:.2f}%, Acc: {train_metrics[4]:.2f}%")
+    print(f"Test  -> MSE: {test_metrics[0]:.4f}, RMSE: {test_metrics[1]:.4f}, "
+          f"MAE: {test_metrics[2]:.4f}, R²: {test_metrics[3]:.2f}%, Acc: {test_metrics[4]:.2f}%")
+    print(f"Overall -> MSE: {overall_metrics[0]:.4f}, RMSE: {overall_metrics[1]:.4f}, "
+          f"MAE: {overall_metrics[2]:.4f}, R²: {overall_metrics[3]:.2f}%, Acc: {overall_metrics[4]:.2f}%")
+
+    # ======================
+    # Combined Regression Plot (Overall: Train + Test)
+    # ======================
+    plt.figure(figsize=(8, 6))
+    plt.scatter(Y_all_orig, Y_all_pred, edgecolors="black", facecolors="teal",
+                alpha=0.75, s=70, label="All Data")
+    min_val = float(min(Y_all_orig))
+    max_val = float(max(Y_all_orig))
+    plt.plot([min_val, max_val], [min_val, max_val], "r--", lw=2, label="Ideal")
+    plt.xlabel("Actual Hydrogen Absorption Time")
+    plt.ylabel("Predicted Hydrogen Absorption Time")
+    plt.title(f"CatBoost Run {run_id} - Regression Plot (Overall Data)")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(run_path, f"CatBoost_Run_{run_id}_Regression_Overall.png"), dpi=300)
+    plt.close()
+
+    # ======================
+    # Separate Regression Plots for Train and Test
+    # ======================
+    # Train regression plot
+    plt.figure(figsize=(8, 6))
+    plt.scatter(Y_train_orig, Y_train_pred, edgecolors="black", facecolors="blue",
+                alpha=0.75, s=70, label="Train Data")
+    min_val = float(min(Y_train_orig))
+    max_val = float(max(Y_train_orig))
+    plt.plot([min_val, max_val], [min_val, max_val], "r--", lw=2, label="Ideal")
+    plt.xlabel("Actual Hydrogen Absorption Time")
+    plt.ylabel("Predicted Hydrogen Absorption Time")
+    plt.title(f"CatBoost Run {run_id} - Regression Plot (Train Data)")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(run_path, f"CatBoost_Run_{run_id}_Regression_Train.png"), dpi=300)
+    plt.close()
+    
+    # Test regression plot
+    plt.figure(figsize=(8, 6))
+    plt.scatter(Y_test_orig, Y_test_pred, edgecolors="black", facecolors="green",
+                alpha=0.75, s=70, label="Test Data")
+    min_val = float(min(Y_test_orig))
+    max_val = float(max(Y_test_orig))
+    plt.plot([min_val, max_val], [min_val, max_val], "r--", lw=2, label="Ideal")
+    plt.xlabel("Actual Hydrogen Absorption Time")
+    plt.ylabel("Predicted Hydrogen Absorption Time")
+    plt.title(f"CatBoost Run {run_id} - Regression Plot (Test Data)")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(run_path, f"CatBoost_Run_{run_id}_Regression_Test.png"), dpi=300)
+    plt.close()
+
+    # Save predictions for this run
+    pred_df = pd.DataFrame({
+        'Actual': Y_all_orig.flatten(),
+        'Predicted': Y_all_pred.flatten(),
+        'Set': ['Train'] * len(Y_train_orig) + ['Test'] * len(Y_test_orig)
+    })
+    pred_df.to_csv(os.path.join(run_path, f"CatBoost_Run_{run_id}_Predictions.csv"), index=False)
+
+    # Return metrics and model
+    return model, test_metrics[0], train_metrics, test_metrics, overall_metrics
+
+# ---------------- SOBOL ANALYSIS FUNCTION ----------------
+def perform_sobol_analysis(run_id, run_path, model, scaler_X, scaler_Y, X):
+    # Define the problem (safe bounds)
+    bounds = []
+    for col in X.columns:
+        col_min, col_max = X[col].min(), X[col].max()
+        if col_min == col_max:  
+            # avoid zero-width bound
+            col_min -= 1e-6
+            col_max += 1e-6
+        bounds.append([col_min, col_max])
+
+    problem = {
+        'num_vars': X.shape[1],
+        'names': X.columns.tolist(),
+        'bounds': bounds
+    }
+
+    # Sobol sampling
+    param_values = saltelli.sample(problem, 1024, calc_second_order=True)
+
+    # Ensure shape matches before scaling
+    if param_values.shape[1] != X.shape[1]:
+        raise ValueError(
+            f"Shape mismatch: Sobol sample has {param_values.shape[1]} cols, "
+            f"but dataset has {X.shape[1]} features"
+        )
+
+    # Scale params into model space
+    param_values_scaled = scaler_X.transform(param_values)
+
+    # Predict using trained model
+    Y_sobol_pred_scaled = model.predict(param_values_scaled)
+    Y_sobol_pred = scaler_Y.inverse_transform(Y_sobol_pred_scaled.reshape(-1, 1)).flatten()
+
+    # Sobol Analysis
+    sobol_indices = sobol.analyze(problem, Y_sobol_pred, print_to_console=False)
+
+    # Signed direction via Pearson correlation (approx directional sensitivity)
+    signed_corr = [
+        pearsonr(param_values[:, i], Y_sobol_pred)[0] for i in range(X.shape[1])
+    ]
+
+    # Apply sign to indices
+    s1_signed = np.sign(signed_corr) * sobol_indices['S1']
+    st_signed = np.sign(signed_corr) * sobol_indices['ST']
+
+    # Collect results
+    sobol_df_signed = pd.DataFrame({
+        'Feature': problem['names'],
+        'Signed S1': s1_signed,
+        'S1 Conf': sobol_indices['S1_conf'],
+        'Signed ST': st_signed,
+        'ST Conf': sobol_indices['ST_conf'],
+        'Correlation': signed_corr
+    })
+
+    sobol_df_signed['Original Order'] = range(len(sobol_df_signed))
+    sobol_df_signed.sort_values(by='Original Order', inplace=True)
+    sobol_df_signed.drop(columns='Original Order', inplace=True)
+
+    print(f"\n--- Run {run_id} Signed Sobol Sensitivity Analysis Results (CatBoost) ---")
+    print(sobol_df_signed)
+
+    # Save
+    signed_csv_path = os.path.join(run_path, "Signed_Sobol_Sensitivity.csv")
+    sobol_df_signed.to_csv(signed_csv_path, index=False)
+    print(f"\nSigned Sobol results saved at: {signed_csv_path}")
+
+    # Plotting
+    plt.rcParams.update({'font.size': 12, 'figure.figsize': (12, 6)})
+
+    # --- Plot Signed S1 ---
+    plt.figure()
+    colors = ['crimson' if val < 0 else 'teal' for val in sobol_df_signed['Signed S1']]
+    plt.barh(sobol_df_signed['Feature'], sobol_df_signed['Signed S1'], color=colors)
+    plt.axvline(0, color='black', linestyle='--')
+    plt.title(f"Run {run_id} - Signed First-order Sobol Sensitivity (1st order)")
+    plt.xlabel("Signed S1")
+    plt.ylabel("Feature")
+    plt.tight_layout()
+    plt.savefig(os.path.join(run_path, "Signed_Sobol_S1.png"))
+    plt.close()
+
+    # --- Plot Signed ST ---
+    plt.figure()
+    colors = ['crimson' if val < 0 else 'teal' for val in sobol_df_signed['Signed ST']]
+    plt.barh(sobol_df_signed['Feature'], sobol_df_signed['Signed ST'], color=colors)
+    plt.axvline(0, color='black', linestyle='--')
+    plt.title(f"Run {run_id} - Signed Total-order Sobol Sensitivity")
+    plt.xlabel("Signed ST")
+    plt.ylabel("Feature")
+    plt.tight_layout()
+    plt.savefig(os.path.join(run_path, "Signed_Sobol.png"))
+    plt.close()
+    
+    return sobol_df_signed
+
+# ---------------- MULTIPLE RUNS ----------------
+results = []
+all_metrics = []
+all_sobol_results = []
+
+for run in range(1, 6):
+    # Create separate folder for each run
+    run_path = os.path.join(base_save_path, f"Run_{run}")
+    os.makedirs(run_path, exist_ok=True)
+    
+    print(f"\n{'='*50}")
+    print(f"STARTING RUN {run}")
+    print(f"{'='*50}")
+    
+    # Set random seeds for reproducibility
+    np.random.seed(42 + run)
+    
+    # Train-test split with different random state for each run
+    X_train, X_test, Y_train, Y_test = train_test_split(X, Y, test_size=0.3, random_state=42 + run)
+    
+    # Scaling - create new scalers for each run
+    scaler_X = StandardScaler()
+    scaler_Y = StandardScaler()
+    X_train_scaled = scaler_X.fit_transform(X_train)
+    X_test_scaled = scaler_X.transform(X_test)
+    Y_train_scaled = scaler_Y.fit_transform(Y_train.values.reshape(-1, 1)).flatten()
+    Y_test_scaled = scaler_Y.transform(Y_test.values.reshape(-1, 1)).flatten()
+    
+    # Save scalers for this run
+    with open(os.path.join(run_path, "Scaler_X.pkl"), 'wb') as f:
+        pickle.dump(scaler_X, f)
+    with open(os.path.join(run_path, "Scaler_Y.pkl"), 'wb') as f:
+        pickle.dump(scaler_Y, f)
+    
+    # Save training parameters
+    params_df = pd.DataFrame({
+        'Parameter': ['Random State', 'Test Size', 'Iterations', 'Learning Rate', 'Depth'],
+        'Value': [42 + run, 0.3, 1000, 0.05, 6]
+    })
+    params_df.to_csv(os.path.join(run_path, "training_parameters.csv"), index=False)
+    
+    # Train model
+    model, best_loss, train_metrics, test_metrics, overall_metrics = train_catboost(
+        run_id=run, 
+        run_path=run_path,
+        X_train_scaled=X_train_scaled,
+        Y_train_scaled=Y_train_scaled,
+        X_test_scaled=X_test_scaled,
+        Y_test_scaled=Y_test_scaled,
+        scaler_Y=scaler_Y
+    )
+    
+    # Save model for this run
+    with open(os.path.join(run_path, "CatBoost_Model.pkl"), 'wb') as f:
+        pickle.dump(model, f)
+    
+    # Perform Sobol analysis for this run
+    sobol_results = perform_sobol_analysis(run, run_path, model, scaler_X, scaler_Y, X)
+    sobol_results['Run'] = run
+    all_sobol_results.append(sobol_results)
+    
+    results.append((run, best_loss))
+    
+    # Store metrics for CSV export
+    all_metrics.append({
+        'Run': run,
+        'Train_MSE': train_metrics[0],
+        'Train_RMSE': train_metrics[1],
+        'Train_MAE': train_metrics[2],
+        'Train_R2': train_metrics[3],
+        'Train_Accuracy': train_metrics[4],
+        'Test_MSE': test_metrics[0],
+        'Test_RMSE': test_metrics[1],
+        'Test_MAE': test_metrics[2],
+        'Test_R2': test_metrics[3],
+        'Test_Accuracy': test_metrics[4],
+        'Overall_MSE': overall_metrics[0],
+        'Overall_RMSE': overall_metrics[1],
+        'Overall_MAE': overall_metrics[2],
+        'Overall_R2': overall_metrics[3],
+        'Overall_Accuracy': overall_metrics[4]
+    })
+    
+    # Save run-specific metrics
+    run_metrics_df = pd.DataFrame([all_metrics[-1]])
+    run_metrics_df.to_csv(os.path.join(run_path, "run_metrics.csv"), index=False)
+
+# Save all metrics to CSV
+metrics_df = pd.DataFrame(all_metrics)
+metrics_df.to_csv(os.path.join(base_save_path, "CatBoost_All_Runs_Metrics.csv"), index=False)
+
+# Save all Sobol results
+sobol_all_df = pd.concat(all_sobol_results, ignore_index=True)
+sobol_all_df.to_csv(os.path.join(base_save_path, "All_Runs_Sobol_Results.csv"), index=False)
+
+# Pick best run
+best_run = min(results, key=lambda x: x[1])
+print(f"\n>>> Best Run: {best_run[0]} with Test MSE = {best_run[1]:.4f}")
+
+print(f"\nAll results have been saved to: {base_save_path}")
+
+# ---------------- SUMMARY PLOTS ACROSS RUNS ----------------
+# Test MSE across runs
+plt.figure(figsize=(12, 8))
+for run in range(1, 6):
+    run_path = os.path.join(base_save_path, f"Run_{run}")
+    run_metrics_path = os.path.join(run_path, "run_metrics.csv")
+    if os.path.exists(run_metrics_path):
+        run_df = pd.read_csv(run_metrics_path)
+        plt.bar(run, run_df['Test_MSE'].values[0], alpha=0.7, label=f'Run {run}')
+plt.xlabel('Run', fontsize=14)
+plt.ylabel('Test MSE', fontsize=14)
+plt.title('Test MSE Across All Runs', fontsize=16)
+plt.legend(fontsize=12)
+plt.grid(alpha=0.3)
+plt.xticks(fontsize=12)
+plt.yticks(fontsize=12)
+plt.savefig(os.path.join(base_save_path, "all_runs_test_mse.png"), dpi=300, bbox_inches='tight')
+plt.close()
+
+# Test R² across runs
+plt.figure(figsize=(12, 8))
+for run in range(1, 6):
+    run_path = os.path.join(base_save_path, f"Run_{run}")
+    run_metrics_path = os.path.join(run_path, "run_metrics.csv")
+    if os.path.exists(run_metrics_path):
+        run_df = pd.read_csv(run_metrics_path)
+        plt.bar(run, run_df['Test_R2'].values[0], alpha=0.7, label=f'Run {run}')
+plt.xlabel('Run', fontsize=14)
+plt.ylabel('Test R² (%)', fontsize=14)
+plt.title('Test R² Across All Runs', fontsize=16)
+plt.legend(fontsize=12)
+plt.grid(alpha=0.3)
+plt.xticks(fontsize=12)
+plt.yticks(fontsize=12)
+plt.savefig(os.path.join(base_save_path, "all_runs_test_r2.png"), dpi=300, bbox_inches='tight')
+plt.close()
+
+# Overall R² scatter plot
+plt.figure(figsize=(10, 8))
+for run in range(1, 6):
+    run_path = os.path.join(base_save_path, f"Run_{run}")
+    run_metrics_path = os.path.join(run_path, "run_metrics.csv")
+    if os.path.exists(run_metrics_path):
+        run_df = pd.read_csv(run_metrics_path)
+        plt.scatter(run, run_df['Overall_R2'].values[0], s=150, label=f'Run {run}', edgecolor='k')
+plt.xlabel('Run', fontsize=14)
+plt.ylabel('Overall R² Score (%)', fontsize=14)
+plt.title('Overall R² Score Across Runs', fontsize=16)
+plt.legend(fontsize=12)
+plt.grid(alpha=0.3)
+plt.xticks(fontsize=12)
+plt.yticks(fontsize=12)
+plt.savefig(os.path.join(base_save_path, "all_runs_overall_r2.png"), dpi=300, bbox_inches='tight')
+plt.close()
+
+print("\n=== TRAINING COMPLETE ===")
+print(metrics_df[['Run', 'Test_MSE', 'Test_MAE', 'Test_R2', 'Test_Accuracy', 'Overall_R2']].to_string(index=False))
+print(f"\nResults saved in folder: {base_save_path}")
