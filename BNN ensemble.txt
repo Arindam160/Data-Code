@@ -1,0 +1,1617 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+bnn_ensemble_absorption.py - Ensemble Bayesian Neural Network Model
+Combines 3 pre-trained BNN models for Hydrogen Absorption Prediction
+
+This script creates an ensemble (committee) of 3 pre-trained BNN models
+to improve prediction accuracy and uncertainty quantification.
+
+Key Features:
+- Loads 3 pre-trained BNN models (H5 format)
+- Ensemble predictions with uncertainty quantification
+- Proper train-validation-test splits (70-15-15)
+- Uncertainty visualization with error bars
+- Sobol sensitivity analysis with signed indices
+- Comprehensive regression plots with uncertainty bands
+- Saves organized folder structure for ensemble results
+- Saves complete ensemble model and scalers for future use
+- Saves complete committee model as pickle file for easy loading
+────────────────────────────────────────────────────────────────────────────
+© 2025 Arindam Roy. All rights reserved.
+Author: Arindam Roy
+Email: royarindam160@gmail.com
+Version: 1.0.0
+Last Updated: July 3, 2025
+────────────────────────────────────────────────────────────────────────────
+"""
+
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import joblib
+import json
+import warnings
+import random
+import pickle
+from datetime import datetime
+from matplotlib.patches import Patch
+from scipy import stats
+
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+from scipy.stats import pearsonr
+
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import models
+import h5py
+
+try:
+    from SALib.sample import saltelli
+    from SALib.analyze import sobol
+    SOBOL_AVAILABLE = True
+except ImportError:
+    print("Warning: SALib not installed. Sobol analysis will be skipped.")
+    SOBOL_AVAILABLE = False
+
+# ===============================
+# CONFIGURATION
+# ===============================
+warnings.filterwarnings('ignore')
+
+class Config:
+    # Paths
+    base_save_path = r"C:/Users/admin/Downloads/BNN_Committee_Model_4"
+    data_path = r"G:/Working Model/Alloying (ternary)/New Ternary alloy/TA_BNN/Dataset/Ternary_4.csv"
+    
+    # Model paths (3 pre-trained models in H5 format)
+    model_paths = [
+        r"G:/Working Model/Alloying (ternary)/New Ternary alloy/TA_BNN/TA_BNN_4/Run_17_26_Neurons/BNN_Model.h5",  
+        r"G:/Working Model/Alloying (ternary)/New Ternary alloy/TA_BNN/TA_BNN_4/Run_11_20_Neurons/BNN_Model.h5",  
+        r"G:/Working Model/Alloying (ternary)/New Ternary alloy/TA_BNN/TA_BNN_4/Run_7_16_Neurons/BNN_Model.h5" 
+    ]
+    
+    # Scalers path (using one as reference - all models use same scaling)
+    scaler_x_path = r"G:/Working Model/Alloying (ternary)/New Ternary alloy/TA_BNN/TA_BNN_4/Run_17_26_Neurons/Scaler_X.pkl"
+    scaler_y_path = r"G:/Working Model/Alloying (ternary)/New Ternary alloy/TA_BNN/TA_BNN_4/Run_17_26_Neurons/Scaler_Y.pkl" 
+    
+    # Features and target (IN ORIGINAL ORDER)
+    feature_names = ['Ni_atom%', 'M2_AW', 'M2_EN', 'M2_AR', 'M2_Enthal', 'M2_Ecoh', 'M2_atom%', 'Milling_Time',
+           'Des_Temp.', 'Des_Pressure']
+    target_name = 'Des. wt%'
+    
+    # Training split
+    train_ratio = 0.70
+    val_ratio = 0.15
+    test_ratio = 0.15
+    
+    # Ensemble parameters
+    num_mc_samples = 100  # Number of MC samples per model for uncertainty
+    random_seed = 42
+
+# ===============================
+# MODEL LOADER CLASS
+# ===============================
+class ModelLoader:
+    """Handles loading of pre-trained models and scalers"""
+    
+    def __init__(self, config):
+        self.config = config
+        self.models = []
+        self.scalers = {}
+        self.model_status = []
+        self.scaler_status = {}
+        
+    def load_models_and_scalers(self):
+        """Load all pre-trained models and scalers"""
+        print("\n" + "=" * 60)
+        print("LOADING PRE-TRAINED BNN MODELS AND SCALERS")
+        print("=" * 60)
+        
+        # Define custom objects for model loading
+        custom_objects = {
+            'mse': 'mse',
+            'mean_squared_error': 'mse',
+            'mae': 'mae',
+            'mean_absolute_error': 'mae'
+        }
+        
+        # Load scalers first
+        try:
+            self.scalers['X'] = joblib.load(self.config.scaler_x_path)
+            self.scalers['y'] = joblib.load(self.config.scaler_y_path)
+            self.scaler_status = {'X': 'loaded', 'y': 'loaded'}
+            print(f"✓ Scaler_X loaded from: {self.config.scaler_x_path}")
+            print(f"✓ Scaler_y loaded from: {self.config.scaler_y_path}")
+        except Exception as e:
+            print(f"✗ Error loading scalers: {str(e)}")
+            self.scaler_status = {'X': 'failed', 'y': 'failed'}
+            raise
+        
+        # Load each model
+        for i, model_path in enumerate(self.config.model_paths):
+            try:
+                if not os.path.exists(model_path):
+                    print(f"✗ Model {i+1} not found: {model_path}")
+                    self.model_status.append('not_found')
+                    continue
+                
+                # Try loading with custom objects
+                try:
+                    model = models.load_model(model_path, custom_objects=custom_objects, compile=False)
+                except:
+                    with keras.utils.custom_object_scope(custom_objects):
+                        model = models.load_model(model_path, compile=False)
+                
+                # Recompile model
+                model.compile(optimizer='adam', loss='mse', metrics=['mae', 'mse'])
+                
+                self.models.append(model)
+                self.model_status.append('loaded')
+                
+                # Get number of neurons from first dense layer
+                neurons = model.layers[1].units if len(model.layers) > 1 else "unknown"
+                print(f"✓ Model {i+1} loaded: {os.path.basename(os.path.dirname(model_path))} ({neurons} neurons)")
+                
+            except Exception as e:
+                print(f"✗ Error loading model {i+1}: {str(e)}")
+                self.model_status.append('failed')
+                
+                # Try alternative loading method
+                try:
+                    with h5py.File(model_path, 'r') as f:
+                        print(f"  File is valid H5 format")
+                    model = models.load_model(model_path, compile=False)
+                    model.compile(optimizer='adam', loss='mse', metrics=['mae'])
+                    self.models.append(model)
+                    self.model_status[-1] = 'loaded_alternative'
+                    print(f"✓ Model {i+1} loaded with alternative method")
+                except Exception as e2:
+                    print(f"✗ Alternative loading also failed: {str(e2)}")
+        
+        print(f"\nTotal models loaded: {len(self.models)} out of {len(self.config.model_paths)}")
+        return self.models, self.scalers, self.model_status, self.scaler_status
+
+# ===============================
+# COMMITTEE MODEL CLASS
+# ===============================
+class CommitteeModel:
+    """
+    Committee model that combines multiple BNN models for ensemble predictions
+    with uncertainty quantification
+    """
+    
+    def __init__(self, models, scaler_x, scaler_y, feature_names, target_name):
+        self.models = models
+        self.scaler_x = scaler_x
+        self.scaler_y = scaler_y
+        self.feature_names = feature_names
+        self.target_name = target_name
+        self.n_models = len(models)
+        self.model_weights = np.ones(self.n_models) / self.n_models  # Equal weights initially
+        
+    def predict(self, X, n_mc_samples=100, return_all=False):
+        """
+        Make predictions with uncertainty
+        
+        Args:
+            X: Input features (n_samples, n_features) - already scaled
+            n_mc_samples: Number of MC samples per model
+            return_all: If True, return all predictions for detailed analysis
+            
+        Returns:
+            mean_pred: Mean prediction (n_samples, 1)
+            std_pred: Prediction uncertainty (n_samples, 1)
+            (optional) all_predictions: All individual predictions
+        """
+        all_predictions = []
+        
+        for model in self.models:
+            model_preds = []
+            for _ in range(n_mc_samples):
+                pred = model.predict(X, verbose=0)
+                model_preds.append(pred)
+            all_predictions.append(np.array(model_preds))
+        
+        # Combine all predictions: (n_models * n_samples, n_samples, 1)
+        all_predictions = np.vstack(all_predictions)
+        
+        # Calculate statistics
+        mean_pred = np.mean(all_predictions, axis=0)
+        std_pred = np.std(all_predictions, axis=0)
+        
+        if return_all:
+            return mean_pred, std_pred, all_predictions
+        return mean_pred, std_pred
+    
+    def predict_with_original_scale(self, X_original, n_mc_samples=100, return_all=False):
+        """Make predictions with original (unscaled) inputs and outputs"""
+        X_scaled = self.scaler_x.transform(X_original)
+        mean_pred_scaled, std_pred_scaled, *rest = self.predict(X_scaled, n_mc_samples, return_all)
+        
+        mean_pred = self.scaler_y.inverse_transform(mean_pred_scaled)
+        std_pred = std_pred_scaled * self.scaler_y.scale_
+        
+        if return_all:
+            all_preds_scaled = rest[0]
+            all_preds = np.array([self.scaler_y.inverse_transform(p) for p in all_preds_scaled])
+            return mean_pred, std_pred, all_preds
+        return mean_pred, std_pred
+    
+    def get_model_agreement(self, X, n_mc_samples=50):
+        """Calculate agreement between models (std of model means)"""
+        model_means = []
+        
+        for model in self.models:
+            preds = []
+            for _ in range(n_mc_samples):
+                preds.append(model.predict(X, verbose=0))
+            model_means.append(np.mean(preds, axis=0))
+        
+        model_means = np.array(model_means)
+        agreement = np.std(model_means, axis=0)
+        
+        return agreement
+    
+    def save(self, path):
+        """Save the committee model (saves model paths and weights)"""
+        model_info = {
+            'n_models': self.n_models,
+            'model_paths': [None] * self.n_models,  # Don't save actual paths
+            'model_weights': self.model_weights.tolist(),
+            'feature_names': self.feature_names,
+            'target_name': self.target_name,
+            'scaler_x_mean': self.scaler_x.mean_.tolist() if hasattr(self.scaler_x, 'mean_') else None,
+            'scaler_x_scale': self.scaler_x.scale_.tolist() if hasattr(self.scaler_x, 'scale_') else None,
+            'scaler_y_mean': self.scaler_y.mean_.tolist() if hasattr(self.scaler_y, 'mean_') else None,
+            'scaler_y_scale': self.scaler_y.scale_.tolist() if hasattr(self.scaler_y, 'scale_') else None
+        }
+        
+        with open(path, 'w') as f:
+            json.dump(model_info, f, indent=4)
+        print(f"✓ Committee model info saved to: {path}")
+    
+    def save_pickle(self, path):
+        """
+        Save the complete committee model as a pickle file
+        This saves the entire object including the loaded Keras models
+        """
+        try:
+            # Create a copy of the models list to avoid any reference issues
+            models_copy = self.models.copy()
+            
+            # Create a dictionary with all necessary components
+            committee_pickle = {
+                'models': models_copy,
+                'scaler_x': self.scaler_x,
+                'scaler_y': self.scaler_y,
+                'feature_names': self.feature_names,
+                'target_name': self.target_name,
+                'n_models': self.n_models,
+                'model_weights': self.model_weights,
+                'creation_date': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+            
+            # Save using pickle
+            with open(path, 'wb') as f:
+                pickle.dump(committee_pickle, f)
+            
+            print(f"✓ Complete committee model saved as pickle to: {path}")
+            return True
+            
+        except Exception as e:
+            print(f"✗ Error saving committee model as pickle: {str(e)}")
+            return False
+
+# ===============================
+# MODEL SAVER CLASS
+# ===============================
+class ModelSaver:
+    """Handles saving of models and results"""
+    
+    def __init__(self, base_path, timestamp):
+        self.base_path = base_path
+        self.timestamp = timestamp
+        self.results_dir = os.path.join(base_path, f"Ensemble_Results_{timestamp}")
+        os.makedirs(self.results_dir, exist_ok=True)
+        
+    def save_model(self, committee_model):
+        """Save the committee model information"""
+        model_path = os.path.join(self.results_dir, 'committee_model_info.json')
+        committee_model.save(model_path)
+        return model_path
+    
+    def save_model_pickle(self, committee_model):
+        """Save the complete committee model as pickle"""
+        pickle_path = os.path.join(self.results_dir, 'committee_model_complete.pkl')
+        committee_model.save_pickle(pickle_path)
+        return pickle_path
+    
+    def save_scalers(self, scaler_X, scaler_y):
+        """Save the scalers for future use"""
+        scaler_X_path = os.path.join(self.results_dir, 'scaler_X.pkl')
+        scaler_y_path = os.path.join(self.results_dir, 'scaler_y.pkl')
+        
+        joblib.dump(scaler_X, scaler_X_path)
+        joblib.dump(scaler_y, scaler_y_path)
+        
+        print(f"✓ Scaler_X saved to: {scaler_X_path}")
+        print(f"✓ Scaler_y saved to: {scaler_y_path}")
+        return scaler_X_path, scaler_y_path
+    
+    def save_predictions(self, predictions_df):
+        """Save predictions DataFrame"""
+        path = os.path.join(self.results_dir, 'ensemble_predictions.csv')
+        predictions_df.to_csv(path, index=False)
+        return path
+    
+    def save_metrics(self, metrics_dict, filename):
+        """Save metrics to JSON"""
+        path = os.path.join(self.results_dir, filename)
+        with open(path, 'w') as f:
+            json.dump(metrics_dict, f, indent=4, default=str)
+        return path
+    
+    def save_config(self, config):
+        """Save configuration"""
+        path = os.path.join(self.results_dir, 'config.json')
+        config_dict = {k: str(v) if not isinstance(v, (int, float, list)) else v 
+                      for k, v in config.__dict__.items() if not k.startswith('__')}
+        with open(path, 'w') as f:
+            json.dump(config_dict, f, indent=4)
+        return path
+    
+    def get_results_dir(self):
+        """Get the results directory path"""
+        return self.results_dir
+
+# ===============================
+# DATA LOADING & PREPROCESSING
+# ===============================
+def load_data(config):
+    """Load and preprocess data"""
+    try:
+        data = pd.read_csv(config.data_path)
+        # Strip whitespace from column names
+        data.columns = data.columns.str.strip()
+        
+        # Also strip feature names for comparison
+        feature_names_stripped = [name.strip() for name in config.feature_names]
+        target_name_stripped = config.target_name.strip()
+        
+        # Check if target exists with stripped name
+        if target_name_stripped not in data.columns:
+            print(f"Available columns: {list(data.columns)}")
+            raise KeyError(f"Target column '{target_name_stripped}' not found in data")
+        
+        # Features and target
+        X = data[feature_names_stripped]
+        y = data[target_name_stripped].values.reshape(-1, 1)
+        
+        # Check for NaN values
+        if X.isnull().any().any() or np.isnan(y).any():
+            print("Warning: NaN values found in data. Dropping NaN rows...")
+            mask = ~(X.isnull().any(axis=1) | pd.isna(y).flatten())
+            X = X[mask]
+            y = y[mask]
+        
+        print(f"Data loaded successfully: {len(X)} samples, {len(X.columns)} features")
+        return X, y
+    except Exception as e:
+        print(f"Error loading data: {str(e)}")
+        raise
+
+def split_data(X, y, config):
+    """Split data into train, validation, and test sets (70/15/15)"""
+    try:
+        # First split: separate test data
+        X_train_val, X_test, y_train_val, y_test = train_test_split(
+            X, y, test_size=config.test_ratio, 
+            random_state=config.random_seed, shuffle=True
+        )
+        
+        # Second split: separate validation from remaining data
+        val_size_adj = config.val_ratio / (1 - config.test_ratio)
+        X_train, X_val, y_train, y_val = train_test_split(
+            X_train_val, y_train_val, test_size=val_size_adj, 
+            random_state=config.random_seed, shuffle=True
+        )
+        
+        print(f"\nData Split Results:")
+        print(f"  Train samples: {len(X_train)} ({len(X_train)/len(X)*100:.1f}%)")
+        print(f"  Validation samples: {len(X_val)} ({len(X_val)/len(X)*100:.1f}%)")
+        print(f"  Test samples: {len(X_test)} ({len(X_test)/len(X)*100:.1f}%)")
+        print(f"  Overall samples: {len(X)} (100%)")
+        
+        return X_train, X_val, X_test, y_train, y_val, y_test
+    except Exception as e:
+        print(f"Error splitting data: {str(e)}")
+        raise
+
+# ===============================
+# EVALUATION FUNCTIONS
+# ===============================
+def evaluate_predictions(y_true, y_pred_mean, y_pred_std=None, set_name=''):
+    """Evaluate predictions with uncertainty metrics"""
+    metrics = {}
+    
+    try:
+        # Basic metrics
+        metrics['mse'] = mean_squared_error(y_true, y_pred_mean)
+        metrics['rmse'] = np.sqrt(metrics['mse'])
+        metrics['mae'] = mean_absolute_error(y_true, y_pred_mean)
+        metrics['r2'] = r2_score(y_true, y_pred_mean)
+        
+        # Pearson correlation
+        try:
+            metrics['r'] = pearsonr(y_true.flatten(), y_pred_mean.flatten())[0]
+        except:
+            metrics['r'] = 0.0
+        
+        # Uncertainty metrics
+        if y_pred_std is not None and len(y_pred_std) > 0:
+            metrics['mean_std'] = float(np.mean(y_pred_std))
+            metrics['std_of_std'] = float(np.std(y_pred_std))
+            
+            # Calibration metrics
+            with np.errstate(divide='ignore', invalid='ignore'):
+                z_scores = (y_true - y_pred_mean) / (y_pred_std + 1e-8)
+                metrics['calibration_error'] = float(np.mean(np.abs(z_scores[~np.isnan(z_scores)])))
+            
+            # 95% prediction interval coverage
+            lower_bound = y_pred_mean - 1.96 * y_pred_std
+            upper_bound = y_pred_mean + 1.96 * y_pred_std
+            coverage = np.mean((y_true >= lower_bound) & (y_true <= upper_bound))
+            metrics['coverage_95'] = float(coverage)
+            
+            # Prediction interval width
+            metrics['pi_width'] = float(np.mean(upper_bound - lower_bound))
+        
+        print(f"\n{set_name} Metrics:")
+        print(f"  MSE: {metrics['mse']:.4f}")
+        print(f"  RMSE: {metrics['rmse']:.4f}")
+        print(f"  MAE: {metrics['mae']:.4f}")
+        print(f"  R²: {metrics['r2']:.4f}")
+        print(f"  Pearson R: {metrics.get('r', 0):.4f}")
+        
+        if y_pred_std is not None and len(y_pred_std) > 0:
+            print(f"  Mean Uncertainty: {metrics.get('mean_std', 0):.4f}")
+            print(f"  95% PI Coverage: {metrics.get('coverage_95', 0):.2%}")
+            print(f"  Avg PI Width: {metrics.get('pi_width', 0):.4f}")
+        
+        return metrics
+    except Exception as e:
+        print(f"Error in evaluation: {str(e)}")
+        return {
+            'mse': float('inf'), 'rmse': float('inf'), 'mae': float('inf'),
+            'r2': -float('inf'), 'r': 0.0, 'mean_std': 0.0,
+            'coverage_95': 0.0, 'pi_width': 0.0
+        }
+
+def evaluate_overall_predictions(y_true_dict, y_pred_mean_dict, y_pred_std_dict):
+    """Evaluate overall predictions (train+val+test combined)"""
+    try:
+        y_true_all = np.concatenate([
+            y_true_dict['train'].flatten(),
+            y_true_dict['val'].flatten(),
+            y_true_dict['test'].flatten()
+        ])
+        
+        y_pred_all = np.concatenate([
+            y_pred_mean_dict['train'].flatten(),
+            y_pred_mean_dict['val'].flatten(),
+            y_pred_mean_dict['test'].flatten()
+        ])
+        
+        y_pred_std_all = np.concatenate([
+            y_pred_std_dict['train'].flatten(),
+            y_pred_std_dict['val'].flatten(),
+            y_pred_std_dict['test'].flatten()
+        ])
+        
+        overall_metrics = evaluate_predictions(
+            y_true_all.reshape(-1, 1),
+            y_pred_all.reshape(-1, 1),
+            y_pred_std_all.reshape(-1, 1),
+            'Overall (Train+Val+Test)'
+        )
+        
+        return overall_metrics, y_true_all, y_pred_all, y_pred_std_all
+    except Exception as e:
+        print(f"Error calculating overall metrics: {str(e)}")
+        default = {'mse': float('inf'), 'rmse': float('inf'), 'r2': -float('inf'), 
+                  'mean_std': 0.0, 'coverage_95': 0.0}
+        return default, np.array([]), np.array([]), np.array([])
+
+# ===============================
+# VISUALIZATION FUNCTIONS
+# ===============================
+def plot_ensemble_regression_with_uncertainty(y_true_dict, y_pred_mean_dict, y_pred_std_dict,
+                                            per_model_predictions, model_names,
+                                            save_path, config, overall_metrics=None,
+                                            y_true_all=None, y_pred_all=None, y_pred_std_all=None):
+    """Create comprehensive regression plots with uncertainty for ensemble"""
+    
+    try:
+        fig = plt.figure(figsize=(24, 20))
+        
+        # Colors
+        colors = {'train': 'blue', 'val': 'green', 'test': 'red'}
+        model_colors = ['orange', 'purple', 'brown']
+        
+        # 1. Combined regression plot with uncertainty bands
+        ax1 = plt.subplot(3, 4, 1)
+        
+        # Determine global min/max
+        global_min, global_max = float('inf'), float('-inf')
+        for set_name in ['train', 'val', 'test']:
+            y_true = y_true_dict[set_name]
+            y_pred = y_pred_mean_dict[set_name]
+            if len(y_true) > 0:
+                global_min = min(global_min, np.min(y_true), np.min(y_pred))
+                global_max = max(global_max, np.max(y_true), np.max(y_pred))
+        
+        if global_min == float('inf'):
+            global_min, global_max = 0, 1
+        
+        padding = (global_max - global_min) * 0.1
+        global_min -= padding
+        global_max += padding
+        
+        # Plot each dataset
+        for set_name in ['train', 'val', 'test']:
+            y_true = y_true_dict[set_name]
+            y_pred = y_pred_mean_dict[set_name]
+            y_std = y_pred_std_dict[set_name]
+            
+            if len(y_true) == 0:
+                continue
+            
+            # Sort for clean error bands
+            sorted_idx = np.argsort(y_true.flatten())
+            y_true_sorted = y_true.flatten()[sorted_idx]
+            y_pred_sorted = y_pred.flatten()[sorted_idx]
+            y_std_sorted = y_std.flatten()[sorted_idx]
+            
+            # Plot error bands
+            ax1.fill_between(y_true_sorted,
+                            y_pred_sorted - 2*y_std_sorted,
+                            y_pred_sorted + 2*y_std_sorted,
+                            alpha=0.2, color=colors[set_name])
+            
+            # Plot predictions with error bars
+            subsample_step = max(1, len(y_true_sorted)//20)
+            ax1.errorbar(y_true_sorted[::subsample_step],
+                        y_pred_sorted[::subsample_step],
+                        yerr=2*y_std_sorted[::subsample_step],
+                        fmt='o', color=colors[set_name], alpha=0.7,
+                        markersize=6, capsize=3, label=f'{set_name.capitalize()}')
+        
+        # Ideal line
+        ax1.plot([global_min, global_max], [global_min, global_max], 'k--', linewidth=2, label='Ideal')
+        
+        ax1.set_xlim(global_min, global_max)
+        ax1.set_ylim(global_min, global_max)
+        ax1.set_xlabel('True Hydrogen Absorption Weight')
+        ax1.set_ylabel('Predicted Hydrogen Absorption Weight')
+        ax1.set_title('Ensemble BNN Regression with Uncertainty\n(All Data Combined)', fontweight='bold')
+        ax1.legend(loc='best')
+        ax1.grid(True, alpha=0.3)
+        
+        # Add metrics box
+        if overall_metrics:
+            textstr = '\n'.join((
+                f'Overall R² = {overall_metrics.get("r2", 0):.4f}',
+                f'Overall RMSE = {overall_metrics.get("rmse", 0):.4f}',
+                f'Overall MAE = {overall_metrics.get("mae", 0):.4f}',
+                f'Mean Uncertainty = {overall_metrics.get("mean_std", 0):.4f}',
+                f'95% PI Coverage = {overall_metrics.get("coverage_95", 0):.2%}'))
+        else:
+            textstr = f'Ensemble of {len(model_names)} Models'
+        
+        props = dict(boxstyle='round', facecolor='wheat', alpha=0.8)
+        ax1.text(0.05, 0.95, textstr, transform=ax1.transAxes, fontsize=10,
+                verticalalignment='top', bbox=props)
+        
+        # 2-4. Individual dataset plots
+        plot_positions = [2, 3, 4]
+        for idx, set_name in enumerate(['train', 'val', 'test']):
+            ax = plt.subplot(3, 4, plot_positions[idx])
+            y_true = y_true_dict[set_name]
+            y_pred = y_pred_mean_dict[set_name]
+            y_std = y_pred_std_dict[set_name]
+            
+            if len(y_true) == 0:
+                ax.text(0.5, 0.5, f'No {set_name} data', ha='center', va='center')
+                continue
+            
+            # Sort for clean plotting
+            sorted_idx = np.argsort(y_true.flatten())
+            y_true_sorted = y_true.flatten()[sorted_idx]
+            y_pred_sorted = y_pred.flatten()[sorted_idx]
+            y_std_sorted = y_std.flatten()[sorted_idx]
+            
+            # Scatter with error bars
+            ax.errorbar(y_true_sorted, y_pred_sorted, yerr=2*y_std_sorted,
+                       fmt='o', color=colors[set_name], alpha=0.6, markersize=5,
+                       capsize=2, label=f'Predictions ±2σ')
+            
+            # Uncertainty band
+            ax.fill_between(y_true_sorted,
+                           y_pred_sorted - 2*y_std_sorted,
+                           y_pred_sorted + 2*y_std_sorted,
+                           alpha=0.2, color=colors[set_name])
+            
+            # Ideal line
+            ax.plot([global_min, global_max], [global_min, global_max], 'k--', linewidth=1.5)
+            ax.set_xlim(global_min, global_max)
+            ax.set_ylim(global_min, global_max)
+            
+            # Metrics
+            r2 = r2_score(y_true, y_pred)
+            mae = mean_absolute_error(y_true, y_pred)
+            unc_mean = np.mean(y_std)
+            
+            ax.text(0.05, 0.95, f'R² = {r2:.3f}\nMAE = {mae:.3f}\nUnc = {unc_mean:.3f}',
+                    transform=ax.transAxes, fontsize=9,
+                    verticalalignment='top',
+                    bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+            
+            ax.set_xlabel('True Value')
+            ax.set_ylabel('Predicted Value')
+            ax.set_title(f'{set_name.capitalize()} Set (n={len(y_true)})')
+            ax.grid(True, alpha=0.3)
+        
+        # 5. Overall regression plot
+        ax5 = plt.subplot(3, 4, 5)
+        if y_true_all is not None and len(y_true_all) > 0:
+            sorted_idx = np.argsort(y_true_all)
+            y_true_sorted = y_true_all[sorted_idx]
+            y_pred_sorted = y_pred_all[sorted_idx]
+            y_std_sorted = y_pred_std_all[sorted_idx] if y_pred_std_all is not None else np.zeros_like(y_pred_sorted)
+            
+            ax5.errorbar(y_true_sorted, y_pred_sorted, yerr=2*y_std_sorted,
+                        fmt='o', color='purple', alpha=0.5, markersize=3,
+                        capsize=1, label='Overall ±2σ', elinewidth=0.5)
+            
+            ax5.fill_between(y_true_sorted,
+                            y_pred_sorted - 2*y_std_sorted,
+                            y_pred_sorted + 2*y_std_sorted,
+                            alpha=0.2, color='purple')
+            
+            ax5.plot([global_min, global_max], [global_min, global_max], 'k--', linewidth=1.5)
+            ax5.set_xlim(global_min, global_max)
+            ax5.set_ylim(global_min, global_max)
+            
+            if overall_metrics:
+                ax5.text(0.05, 0.95, 
+                        f'Overall R² = {overall_metrics.get("r2", 0):.3f}\n'
+                        f'Overall MAE = {overall_metrics.get("mae", 0):.3f}\n'
+                        f'95% Coverage = {overall_metrics.get("coverage_95", 0):.2%}',
+                        transform=ax5.transAxes, fontsize=9,
+                        verticalalignment='top',
+                        bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+            
+            ax5.set_xlabel('True Value')
+            ax5.set_ylabel('Predicted Value')
+            ax5.set_title(f'Overall Set (n={len(y_true_all)})')
+            ax5.grid(True, alpha=0.3)
+        
+        # 6. Individual model predictions comparison
+        ax6 = plt.subplot(3, 4, 6)
+        for model_idx, model_preds in enumerate(per_model_predictions['test']):
+            if len(model_preds) > 0:
+                ax6.scatter(y_true_dict['test'], model_preds, 
+                          alpha=0.5, s=20, color=model_colors[model_idx % len(model_colors)],
+                          label=f'Model {model_idx+1}', marker='o')
+        
+        ax6.plot([global_min, global_max], [global_min, global_max], 'k--', linewidth=1)
+        ax6.set_xlabel('True Value')
+        ax6.set_ylabel('Predicted Value')
+        ax6.set_title('Individual Model Predictions (Test Set)')
+        ax6.legend(loc='best', fontsize=8)
+        ax6.grid(True, alpha=0.3)
+        
+        # 7. Residual plot
+        ax7 = plt.subplot(3, 4, 7)
+        for set_name in ['train', 'val', 'test']:
+            y_true = y_true_dict[set_name]
+            y_pred = y_pred_mean_dict[set_name]
+            if len(y_true) > 0:
+                residuals = y_true - y_pred
+                ax7.scatter(y_pred, residuals, alpha=0.5, s=20,
+                          color=colors[set_name], label=set_name.capitalize())
+        
+        ax7.axhline(y=0, color='k', linestyle='--', linewidth=1)
+        ax7.set_xlabel('Predicted Value')
+        ax7.set_ylabel('Residual')
+        ax7.set_title('Residual Plot by Dataset')
+        ax7.legend(loc='best')
+        ax7.grid(True, alpha=0.3)
+        
+        # 8. Uncertainty distribution
+        ax8 = plt.subplot(3, 4, 8)
+        for set_name in ['train', 'val', 'test']:
+            uncertainties = y_pred_std_dict[set_name].flatten()
+            if len(uncertainties) > 0:
+                ax8.hist(uncertainties, bins=30, alpha=0.5, density=True,
+                        color=colors[set_name], label=set_name.capitalize())
+        
+        if y_pred_std_all is not None and len(y_pred_std_all) > 0:
+            ax8.hist(y_pred_std_all, bins=30, alpha=0.3, density=True,
+                    color='purple', label='Overall', histtype='step', linewidth=2)
+        
+        ax8.set_xlabel('Prediction Uncertainty (Std Dev)')
+        ax8.set_ylabel('Density')
+        ax8.set_title('Uncertainty Distribution')
+        ax8.legend(loc='best')
+        ax8.grid(True, alpha=0.3)
+        
+        # 9. Model agreement analysis
+        ax9 = plt.subplot(3, 4, 9)
+        model_disagreement = np.std(per_model_predictions['test'], axis=0).flatten()
+        test_uncertainty = y_pred_std_dict['test'].flatten()
+        
+        ax9.scatter(test_uncertainty, model_disagreement, alpha=0.6, s=30, c='darkblue')
+        
+        # Add correlation line
+        z = np.polyfit(test_uncertainty, model_disagreement, 1)
+        p = np.poly1d(z)
+        ax9.plot(np.sort(test_uncertainty), p(np.sort(test_uncertainty)), 
+                "r--", alpha=0.8, label=f'Correlation: {pearsonr(test_uncertainty, model_disagreement)[0]:.3f}')
+        
+        ax9.set_xlabel('Ensemble Uncertainty')
+        ax9.set_ylabel('Model Disagreement (Std across models)')
+        ax9.set_title('Model Disagreement vs Ensemble Uncertainty')
+        ax9.legend(loc='best')
+        ax9.grid(True, alpha=0.3)
+        
+        # 10. Metrics comparison across models
+        ax10 = plt.subplot(3, 4, 10)
+        model_r2 = []
+        model_mae = []
+        
+        for model_idx in range(len(per_model_predictions['test'])):
+            model_preds = per_model_predictions['test'][model_idx]
+            if len(model_preds) > 0:
+                model_r2.append(r2_score(y_true_dict['test'], model_preds))
+                model_mae.append(mean_absolute_error(y_true_dict['test'], model_preds))
+            else:
+                model_r2.append(0)
+                model_mae.append(0)
+        
+        x_pos = np.arange(len(model_r2))
+        width = 0.35
+        bars1 = ax10.bar(x_pos - width/2, model_r2, width, label='R²', color='teal', alpha=0.7)
+        bars2 = ax10.bar(x_pos + width/2, model_mae, width, label='MAE', color='crimson', alpha=0.7)
+        
+        ax10.set_xlabel('Model Index')
+        ax10.set_ylabel('Score')
+        ax10.set_title('Individual Model Performance (Test Set)')
+        ax10.set_xticks(x_pos)
+        ax10.set_xticklabels([f'M{i+1}' for i in range(len(model_r2))])
+        ax10.legend(loc='upper right')
+        ax10.grid(True, alpha=0.3, axis='y')
+        
+        # Add ensemble performance line
+        ensemble_r2 = r2_score(y_true_dict['test'], y_pred_mean_dict['test'])
+        ax10.axhline(y=ensemble_r2, color='blue', linestyle='--', alpha=0.7, label=f'Ensemble R²={ensemble_r2:.3f}')
+        
+        # 11. Prediction interval coverage by model
+        ax11 = plt.subplot(3, 4, 11)
+        coverage_by_model = []
+        
+        for model_idx in range(len(per_model_predictions['test'])):
+            model_preds = per_model_predictions['test'][model_idx]
+            model_stds = per_model_predictions['test_std'][model_idx]
+            if len(model_preds) > 0:
+                lower = model_preds - 1.96 * model_stds
+                upper = model_preds + 1.96 * model_stds
+                coverage = np.mean((y_true_dict['test'] >= lower) & (y_true_dict['test'] <= upper))
+                coverage_by_model.append(coverage)
+            else:
+                coverage_by_model.append(0)
+        
+        bars = ax11.bar(range(len(coverage_by_model)), coverage_by_model, 
+                       color='steelblue', alpha=0.7)
+        ax11.axhline(y=0.95, color='red', linestyle='--', alpha=0.7, label='Ideal 95%')
+        ax11.set_xlabel('Model Index')
+        ax11.set_ylabel('Coverage Probability')
+        ax11.set_title('95% PI Coverage by Model (Test Set)')
+        ax11.set_xticks(range(len(coverage_by_model)))
+        ax11.set_xticklabels([f'M{i+1}' for i in range(len(coverage_by_model))])
+        ax11.set_ylim([0, 1])
+        ax11.legend()
+        ax11.grid(True, alpha=0.3, axis='y')
+        
+        # 12. Ensemble improvement
+        ax12 = plt.subplot(3, 4, 12)
+        
+        # Calculate improvement over best individual model
+        best_model_r2 = max(model_r2) if model_r2 else 0
+        improvement = ensemble_r2 - best_model_r2
+        
+        metrics_improvement = ['R²', 'MAE', 'Uncertainty']
+        improvement_values = [
+            improvement,
+            (np.min(model_mae) - overall_metrics.get('mae', 0)) if model_mae else 0,
+            (np.min([np.mean(m) for m in per_model_predictions['test_std'] if len(m) > 0]) - overall_metrics.get('mean_std', 0)) if per_model_predictions['test_std'] else 0
+        ]
+        
+        colors_imp = ['green' if v > 0 else 'red' for v in improvement_values]
+        bars = ax12.bar(metrics_improvement, improvement_values, color=colors_imp, alpha=0.7)
+        ax12.axhline(y=0, color='black', linewidth=1)
+        ax12.set_ylabel('Improvement over Best Model')
+        ax12.set_title('Ensemble Improvement')
+        ax12.grid(True, alpha=0.3, axis='y')
+        
+        for bar, val in zip(bars, improvement_values):
+            height = bar.get_height()
+            ax12.text(bar.get_x() + bar.get_width()/2., height + 0.001 if height >= 0 else height - 0.01,
+                     f'{val:.3f}', ha='center', va='bottom' if height >= 0 else 'top', fontsize=9)
+        
+        plt.suptitle(f'Ensemble BNN Model Analysis - Committee of {len(model_names)} Models\n70/15/15 Split with Overall Results', 
+                    fontsize=16, fontweight='bold')
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_path, 'ensemble_regression_analysis.png'), dpi=300, bbox_inches='tight')
+        plt.close()
+        
+    except Exception as e:
+        print(f"Error plotting ensemble regression: {str(e)}")
+
+def plot_sobol_global_sensitivity_bar(results_dir, feature_names, combined_df=None):
+    """
+    Create a comprehensive Sobol global sensitivity bar plot with original feature order
+    and signed negative/positive values for the ensemble model.
+    """
+    print("\n" + "=" * 70)
+    print("CREATING SOBOL GLOBAL SENSITIVITY BAR PLOT (SIGNED, ORIGINAL ORDER)")
+    print("=" * 70)
+    
+    try:
+        if combined_df is None or len(combined_df) == 0:
+            print("  ✗ No Sobol results found.")
+            return None, None
+        
+        # Create plots
+        fig, axes = plt.subplots(2, 2, figsize=(20, 14))
+        
+        # Get features in original order
+        features_original = feature_names
+        
+        # 1. Signed S1 - Box Plot
+        ax1 = axes[0, 0]
+        box_data_s1 = []
+        positions_s1 = []
+        colors_s1 = []
+        
+        for i, feature in enumerate(features_original):
+            feature_data = combined_df[combined_df['Feature'] == feature]['Signed_S1'].values
+            if len(feature_data) > 0:
+                box_data_s1.append(feature_data)
+                positions_s1.append(i)
+                median_val = np.median(feature_data)
+                if median_val > 0:
+                    colors_s1.append('teal')
+                elif median_val < 0:
+                    colors_s1.append('crimson')
+                else:
+                    colors_s1.append('gray')
+        
+        if box_data_s1:
+            bp1 = ax1.boxplot(box_data_s1, positions=positions_s1, widths=0.7, 
+                              patch_artist=True, showfliers=False,
+                              medianprops={'color': 'black', 'linewidth': 2},
+                              whiskerprops={'linewidth': 1.5},
+                              capprops={'linewidth': 1.5},
+                              boxprops={'linewidth': 1.5})
+            
+            for box, color in zip(bp1['boxes'], colors_s1):
+                box.set_facecolor(color)
+                box.set_alpha(0.7)
+            
+            for i, (pos, data) in enumerate(zip(positions_s1, box_data_s1)):
+                x_jittered = np.random.normal(pos, 0.08, size=len(data))
+                ax1.scatter(x_jittered, data, alpha=0.6, s=40,
+                           color=colors_s1[i], edgecolor='black', linewidth=0.5, zorder=5)
+        
+        ax1.axhline(y=0, color='black', linestyle='-', linewidth=1, alpha=0.5)
+        ax1.set_xticks(range(len(features_original)))
+        ax1.set_xticklabels(features_original, rotation=45, ha='right', fontsize=11)
+        ax1.set_ylabel('Signed First-order Sobol Index (S1)', fontsize=12)
+        ax1.set_title('Ensemble Sobol Sensitivity - Signed S1\n(Boxplot across MC samples)',
+                     fontsize=14, fontweight='bold')
+        ax1.grid(True, alpha=0.3, axis='y')
+        
+        legend_elements = [
+            Patch(facecolor='teal', alpha=0.7, label='Positive Effect'),
+            Patch(facecolor='crimson', alpha=0.7, label='Negative Effect'),
+            Patch(facecolor='gray', alpha=0.7, label='Neutral')
+        ]
+        ax1.legend(handles=legend_elements, loc='upper right', fontsize=10)
+        
+        # 2. Signed ST - Box Plot
+        ax2 = axes[0, 1]
+        box_data_st = []
+        positions_st = []
+        colors_st = []
+        
+        for i, feature in enumerate(features_original):
+            feature_data = combined_df[combined_df['Feature'] == feature]['Signed_ST'].values
+            if len(feature_data) > 0:
+                box_data_st.append(feature_data)
+                positions_st.append(i)
+                median_val = np.median(feature_data)
+                if median_val > 0:
+                    colors_st.append('teal')
+                elif median_val < 0:
+                    colors_st.append('crimson')
+                else:
+                    colors_st.append('gray')
+        
+        if box_data_st:
+            bp2 = ax2.boxplot(box_data_st, positions=positions_st, widths=0.7,
+                              patch_artist=True, showfliers=False,
+                              medianprops={'color': 'black', 'linewidth': 2},
+                              whiskerprops={'linewidth': 1.5},
+                              capprops={'linewidth': 1.5},
+                              boxprops={'linewidth': 1.5})
+            
+            for box, color in zip(bp2['boxes'], colors_st):
+                box.set_facecolor(color)
+                box.set_alpha(0.7)
+            
+            for i, (pos, data) in enumerate(zip(positions_st, box_data_st)):
+                x_jittered = np.random.normal(pos, 0.08, size=len(data))
+                ax2.scatter(x_jittered, data, alpha=0.6, s=40,
+                           color=colors_st[i], edgecolor='black', linewidth=0.5, zorder=5)
+        
+        ax2.axhline(y=0, color='black', linestyle='-', linewidth=1, alpha=0.5)
+        ax2.set_xticks(range(len(features_original)))
+        ax2.set_xticklabels(features_original, rotation=45, ha='right', fontsize=11)
+        ax2.set_ylabel('Signed Total-order Sobol Index (ST)', fontsize=12)
+        ax2.set_title('Ensemble Sobol Sensitivity - Signed ST\n(Boxplot across MC samples)',
+                     fontsize=14, fontweight='bold')
+        ax2.grid(True, alpha=0.3, axis='y')
+        ax2.legend(handles=legend_elements, loc='upper right', fontsize=10)
+        
+        # 3. Mean Signed S1 with Error Bars
+        ax3 = axes[1, 0]
+        means_s1 = []
+        errors_s1 = []
+        colors_s1_mean = []
+        
+        for feature in features_original:
+            feature_data = combined_df[combined_df['Feature'] == feature]['Signed_S1'].values
+            if len(feature_data) > 0:
+                means_s1.append(np.mean(feature_data))
+                errors_s1.append(np.std(feature_data))
+                if np.mean(feature_data) > 0:
+                    colors_s1_mean.append('teal')
+                else:
+                    colors_s1_mean.append('crimson')
+            else:
+                means_s1.append(0)
+                errors_s1.append(0)
+                colors_s1_mean.append('gray')
+        
+        x_pos = np.arange(len(features_original))
+        bars3 = ax3.bar(x_pos, means_s1, yerr=errors_s1, capsize=5,
+                       color=colors_s1_mean, alpha=0.8, edgecolor='black', linewidth=1,
+                       error_kw={'elinewidth': 2, 'capthick': 2})
+        
+        ax3.axhline(y=0, color='black', linestyle='-', linewidth=1, alpha=0.5)
+        ax3.set_xticks(x_pos)
+        ax3.set_xticklabels(features_original, rotation=45, ha='right', fontsize=11)
+        ax3.set_ylabel('Mean Signed S1 (± Std Dev)', fontsize=12)
+        ax3.set_title('Ensemble Mean Signed First-order Sensitivity (S1)\n(Averaged across MC samples)',
+                     fontsize=14, fontweight='bold')
+        ax3.grid(True, alpha=0.3, axis='y')
+        
+        for i, (bar, mean_val) in enumerate(zip(bars3, means_s1)):
+            height = bar.get_height()
+            if height >= 0:
+                ax3.text(bar.get_x() + bar.get_width()/2., height + 0.01,
+                        f'{mean_val:.3f}', ha='center', va='bottom', fontsize=9, fontweight='bold')
+            else:
+                ax3.text(bar.get_x() + bar.get_width()/2., height - 0.03,
+                        f'{mean_val:.3f}', ha='center', va='top', fontsize=9, fontweight='bold')
+        
+        # 4. Mean Signed ST with Error Bars
+        ax4 = axes[1, 1]
+        means_st = []
+        errors_st = []
+        colors_st_mean = []
+        
+        for feature in features_original:
+            feature_data = combined_df[combined_df['Feature'] == feature]['Signed_ST'].values
+            if len(feature_data) > 0:
+                means_st.append(np.mean(feature_data))
+                errors_st.append(np.std(feature_data))
+                if np.mean(feature_data) > 0:
+                    colors_st_mean.append('teal')
+                else:
+                    colors_st_mean.append('crimson')
+            else:
+                means_st.append(0)
+                errors_st.append(0)
+                colors_st_mean.append('gray')
+        
+        bars4 = ax4.bar(x_pos, means_st, yerr=errors_st, capsize=5,
+                       color=colors_st_mean, alpha=0.8, edgecolor='black', linewidth=1,
+                       error_kw={'elinewidth': 2, 'capthick': 2})
+        
+        ax4.axhline(y=0, color='black', linestyle='-', linewidth=1, alpha=0.5)
+        ax4.set_xticks(x_pos)
+        ax4.set_xticklabels(features_original, rotation=45, ha='right', fontsize=11)
+        ax4.set_ylabel('Mean Signed ST (± Std Dev)', fontsize=12)
+        ax4.set_title('Ensemble Mean Signed Total-order Sensitivity (ST)\n(Averaged across MC samples)',
+                     fontsize=14, fontweight='bold')
+        ax4.grid(True, alpha=0.3, axis='y')
+        
+        for i, (bar, mean_val) in enumerate(zip(bars4, means_st)):
+            height = bar.get_height()
+            if height >= 0:
+                ax4.text(bar.get_x() + bar.get_width()/2., height + 0.01,
+                        f'{mean_val:.3f}', ha='center', va='bottom', fontsize=9, fontweight='bold')
+            else:
+                ax4.text(bar.get_x() + bar.get_width()/2., height - 0.03,
+                        f'{mean_val:.3f}', ha='center', va='top', fontsize=9, fontweight='bold')
+        
+        plt.suptitle('Ensemble Sobol Global Sensitivity Analysis - Signed Indices\n(Original Feature Order, Positive=Teal, Negative=Crimson)',
+                    fontsize=16, fontweight='bold')
+        plt.tight_layout()
+        plt.savefig(os.path.join(results_dir, 'ensemble_sobol_global_sensitivity.png'), 
+                   dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"  ✓ Saved ensemble Sobol global sensitivity plot")
+        
+        # Create Summary CSV with Signed Rankings
+        summary_stats = []
+        for feature in features_original:
+            s1_data = combined_df[combined_df['Feature'] == feature]['Signed_S1'].values
+            st_data = combined_df[combined_df['Feature'] == feature]['Signed_ST'].values
+            
+            if len(s1_data) > 0:
+                summary_stats.append({
+                    'Feature': feature,
+                    'S1_Mean': np.mean(s1_data),
+                    'S1_Std': np.std(s1_data),
+                    'S1_Median': np.median(s1_data),
+                    'S1_Min': np.min(s1_data),
+                    'S1_Max': np.max(s1_data),
+                    'S1_Effect': 'Positive' if np.mean(s1_data) > 0 else 'Negative',
+                    'ST_Mean': np.mean(st_data),
+                    'ST_Std': np.std(st_data),
+                    'ST_Median': np.median(st_data),
+                    'ST_Min': np.min(st_data),
+                    'ST_Max': np.max(st_data),
+                    'ST_Effect': 'Positive' if np.mean(st_data) > 0 else 'Negative'
+                })
+        
+        if summary_stats:
+            summary_df = pd.DataFrame(summary_stats)
+            summary_df['S1_Rank'] = summary_df['S1_Mean'].abs().rank(ascending=False).astype(int)
+            summary_df['ST_Rank'] = summary_df['ST_Mean'].abs().rank(ascending=False).astype(int)
+            summary_df = summary_df.sort_values('S1_Rank')
+            summary_df.to_csv(os.path.join(results_dir, 'ensemble_sobol_summary_statistics.csv'), index=False)
+            print(f"  ✓ Saved ensemble Sobol summary statistics")
+            
+            # Print summary
+            print("\n" + "-" * 70)
+            print("ENSEMBLE SOBOL SIGNED SENSITIVITY SUMMARY")
+            print("-" * 70)
+            print("\nTop 5 Features by |S1| (First-order effect):")
+            top_s1 = summary_df.nlargest(5, 'S1_Mean').reset_index(drop=True)
+            for i, row in top_s1.iterrows():
+                print(f"  {i+1}. {row['Feature']:20s}: S1 = {row['S1_Mean']:+.4f} ± {row['S1_Std']:.4f} ({row['S1_Effect']})")
+            
+            print("\nTop 5 Features by |ST| (Total-order effect):")
+            top_st = summary_df.nlargest(5, 'ST_Mean').reset_index(drop=True)
+            for i, row in top_st.iterrows():
+                print(f"  {i+1}. {row['Feature']:20s}: ST = {row['ST_Mean']:+.4f} ± {row['ST_Std']:.4f} ({row['ST_Effect']})")
+            
+            return combined_df, summary_df
+        
+    except Exception as e:
+        print(f"Error creating ensemble Sobol global sensitivity plot: {str(e)}")
+        return None, None
+
+# ===============================
+# SOBOL SENSITIVITY ANALYSIS
+# ===============================
+def ensemble_sobol_sensitivity_analysis(models, scaler_X, scaler_y, feature_names, 
+                                        X_train, save_path, n_samples=500):
+    """
+    Sobol sensitivity analysis for ensemble model
+    """
+    if not SOBOL_AVAILABLE:
+        print("SALib not available. Skipping Sobol analysis.")
+        return None
+    
+    print(f"\nPerforming Ensemble Sobol Sensitivity Analysis...")
+    
+    try:
+        # Define bounds based on training data
+        bounds = []
+        for col in feature_names:
+            lower = float(np.min(X_train[col]))
+            upper = float(np.max(X_train[col]))
+            bounds.append([lower, upper])
+        
+        problem = {
+            'num_vars': len(feature_names),
+            'names': list(feature_names),
+            'bounds': bounds
+        }
+        
+        # Generate Sobol samples
+        param_values = saltelli.sample(problem, n_samples, calc_second_order=True)
+        
+        # Scale inputs
+        param_values_scaled = scaler_X.transform(param_values)
+        
+        # Get ensemble predictions with MC Dropout
+        all_predictions = []
+        for model in models:
+            model_preds = []
+            for _ in range(min(20, 50)):  # MC samples per model
+                pred_scaled = model.predict(param_values_scaled, verbose=0)
+                model_preds.append(pred_scaled)
+            all_predictions.append(np.array(model_preds))
+        
+        # Combine all predictions
+        all_predictions = np.vstack(all_predictions)
+        Y_pred_mean = np.mean(all_predictions, axis=0)
+        Y_pred = scaler_y.inverse_transform(Y_pred_mean).flatten()
+        
+        # Perform Sobol analysis
+        sobol_indices = sobol.analyze(problem, Y_pred, print_to_console=False, 
+                                       calc_second_order=True)
+        
+        # Calculate signed direction
+        signed_corr = []
+        for i in range(len(feature_names)):
+            corr, _ = pearsonr(param_values[:, i], Y_pred)
+            signed_corr.append(corr if not np.isnan(corr) else 0)
+        
+        # Apply sign to indices
+        s1_signed = np.sign(signed_corr) * sobol_indices['S1']
+        st_signed = np.sign(signed_corr) * sobol_indices['ST']
+        
+        # Collect results
+        sobol_results = []
+        for i in range(len(feature_names)):
+            sobol_results.append({
+                'Feature': feature_names[i],
+                'Signed_S1': s1_signed[i],
+                'S1_Conf': sobol_indices['S1_conf'][i],
+                'Signed_ST': st_signed[i],
+                'ST_Conf': sobol_indices['ST_conf'][i],
+                'Correlation': signed_corr[i],
+                'S1_abs': np.abs(s1_signed[i]),
+                'ST_abs': np.abs(st_signed[i])
+            })
+        
+        sobol_df = pd.DataFrame(sobol_results)
+        sobol_df['S1_Rank'] = sobol_df['S1_abs'].rank(ascending=False).astype(int)
+        sobol_df['ST_Rank'] = sobol_df['ST_abs'].rank(ascending=False).astype(int)
+        
+        # Save results
+        sobol_df.to_csv(os.path.join(save_path, 'ensemble_sobol_sensitivity.csv'), index=False)
+        
+        # Create visualization
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+        
+        # Signed S1
+        y_pos = np.arange(len(sobol_df))
+        axes[0].barh(y_pos, sobol_df['Signed_S1'], 
+                     xerr=sobol_df['S1_Conf'],
+                     color=['crimson' if x < 0 else 'teal' for x in sobol_df['Signed_S1']],
+                     capsize=3)
+        axes[0].axvline(0, color='black', linestyle='--')
+        axes[0].set_yticks(y_pos)
+        axes[0].set_yticklabels(sobol_df['Feature'])
+        axes[0].set_xlabel('Signed First-order Sobol Index (S1)')
+        axes[0].set_title('Ensemble First-order Sensitivity')
+        
+        # Signed ST
+        axes[1].barh(y_pos, sobol_df['Signed_ST'],
+                     xerr=sobol_df['ST_Conf'],
+                     color=['crimson' if x < 0 else 'teal' for x in sobol_df['Signed_ST']],
+                     capsize=3)
+        axes[1].axvline(0, color='black', linestyle='--')
+        axes[1].set_yticks(y_pos)
+        axes[1].set_yticklabels(sobol_df['Feature'])
+        axes[1].set_xlabel('Signed Total-order Sobol Index (ST)')
+        axes[1].set_title('Ensemble Total-order Sensitivity')
+        
+        plt.suptitle('Ensemble Sobol Sensitivity Analysis', fontweight='bold')
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_path, 'ensemble_sobol_sensitivity.png'), dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        return sobol_results
+        
+    except Exception as e:
+        print(f"Warning: Ensemble Sobol analysis failed: {str(e)}")
+        return None
+
+# ===============================
+# MONTE CARLO PREDICTION FUNCTION
+# ===============================
+def monte_carlo_predict_ensemble(models, X, n_samples=100):
+    """
+    Make predictions using ensemble of BNN models with MC Dropout
+    Returns mean and std across both ensemble members and MC samples
+    """
+    try:
+        all_predictions = []  # Will store predictions from all models and MC samples
+        
+        for model_idx, model in enumerate(models):
+            model_predictions = []
+            
+            for _ in range(n_samples):
+                # Each forward pass samples different dropout masks
+                pred = model.predict(X, verbose=0)
+                model_predictions.append(pred)
+            
+            model_predictions = np.array(model_predictions)  # (n_samples, n_data, 1)
+            all_predictions.append(model_predictions)
+        
+        # Combine all predictions: (n_models * n_samples, n_data, 1)
+        all_predictions = np.vstack(all_predictions)
+        
+        # Calculate statistics
+        mean_pred = np.mean(all_predictions, axis=0)
+        std_pred = np.std(all_predictions, axis=0)
+        
+        # Also calculate per-model statistics for analysis
+        per_model_means = []
+        per_model_stds = []
+        for model_idx, model in enumerate(models):
+            model_preds = all_predictions[model_idx*n_samples:(model_idx+1)*n_samples]
+            per_model_means.append(np.mean(model_preds, axis=0))
+            per_model_stds.append(np.std(model_preds, axis=0))
+        
+        per_model_means = np.array(per_model_means)  # (n_models, n_data, 1)
+        per_model_stds = np.array(per_model_stds)    # (n_models, n_data, 1)
+        
+        return mean_pred, std_pred, all_predictions, per_model_means, per_model_stds
+    except Exception as e:
+        print(f"Error in ensemble MC prediction: {str(e)}")
+        # Return zeros as fallback
+        if len(models) > 0:
+            mean_pred = models[0].predict(X, verbose=0)
+        else:
+            mean_pred = np.zeros((X.shape[0], 1))
+        std_pred = np.zeros_like(mean_pred)
+        return mean_pred, std_pred, np.array([mean_pred]), np.array([mean_pred]), np.array([std_pred])
+
+# ===============================
+# MAIN FUNCTION
+# ===============================
+def main():
+    """Main ensemble training and evaluation function"""
+    
+    # Set random seeds for reproducibility
+    np.random.seed(Config.random_seed)
+    tf.random.set_seed(Config.random_seed)
+    random.seed(Config.random_seed)
+    
+    print("=" * 70)
+    print("ENSEMBLE BAYESIAN NEURAL NETWORK MODEL")
+    print("=" * 70)
+    print(f"Random Seed: {Config.random_seed}")
+    print(f"Save Path: {Config.base_save_path}")
+    print(f"Data Split: Train {Config.train_ratio*100:.0f}%, "
+          f"Validation {Config.val_ratio*100:.0f}%, Test {Config.test_ratio*100:.0f}%")
+    print(f"Ensemble Size: {len(Config.model_paths)} models")
+    print("=" * 70)
+    
+    try:
+        # Create results directory
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        saver = ModelSaver(Config.base_save_path, timestamp)
+        results_dir = saver.get_results_dir()
+        
+        # Save configuration
+        saver.save_config(Config)
+        
+        # Load data
+        print("\nLoading data...")
+        X, y = load_data(Config)
+        
+        # Split data
+        print("\nSplitting data...")
+        X_train, X_val, X_test, y_train, y_val, y_test = split_data(X, y, Config)
+        
+        # ===============================
+        # Step 2: Load pre-trained models
+        # ===============================
+        model_loader = ModelLoader(Config)
+        models, scalers, model_status, scaler_status = model_loader.load_models_and_scalers()
+        
+        if len(models) == 0:
+            print("Error: No models loaded successfully. Exiting.")
+            return 1
+        
+        # ===============================
+        # Step 3: Create committee model
+        # ===============================
+        print("\n" + "=" * 70)
+        print("CREATING COMMITTEE MODEL")
+        print("=" * 70)
+        
+        committee = CommitteeModel(
+            models=models,
+            scaler_x=scalers['X'],
+            scaler_y=scalers['y'],
+            feature_names=Config.feature_names,
+            target_name=Config.target_name
+        )
+        
+        # Save committee model
+        model_path = saver.save_model(committee)
+        
+        # Save complete committee model as pickle
+        pickle_path = saver.save_model_pickle(committee)
+        
+        # Save scalers
+        saver.save_scalers(scalers['X'], scalers['y'])
+        print(f"✓ Committee model info saved: {model_path}")
+        print(f"✓ Complete committee model saved as pickle: {pickle_path}")
+        
+        # Scale data using loaded scalers
+        print("\nScaling data with pre-trained scalers...")
+        X_train_scaled = scalers['X'].transform(X_train)
+        X_val_scaled = scalers['X'].transform(X_val)
+        X_test_scaled = scalers['X'].transform(X_test)
+        
+        # Make ensemble predictions
+        print(f"\nMaking ensemble predictions with MC Dropout (n={Config.num_mc_samples} samples per model)...")
+        
+        # Train set
+        y_pred_train_mean, y_pred_train_std, _, per_model_train_means, per_model_train_stds = monte_carlo_predict_ensemble(
+            models, X_train_scaled, n_samples=Config.num_mc_samples
+        )
+        
+        # Validation set
+        y_pred_val_mean, y_pred_val_std, _, per_model_val_means, per_model_val_stds = monte_carlo_predict_ensemble(
+            models, X_val_scaled, n_samples=Config.num_mc_samples
+        )
+        
+        # Test set
+        y_pred_test_mean, y_pred_test_std, _, per_model_test_means, per_model_test_stds = monte_carlo_predict_ensemble(
+            models, X_test_scaled, n_samples=Config.num_mc_samples
+        )
+        
+        # Inverse transform predictions
+        y_pred_train_mean = scalers['y'].inverse_transform(y_pred_train_mean)
+        y_pred_val_mean = scalers['y'].inverse_transform(y_pred_val_mean)
+        y_pred_test_mean = scalers['y'].inverse_transform(y_pred_test_mean)
+        
+        y_pred_train_std = y_pred_train_std * scalers['y'].scale_
+        y_pred_val_std = y_pred_val_std * scalers['y'].scale_
+        y_pred_test_std = y_pred_test_std * scalers['y'].scale_
+        
+        # Inverse transform individual model predictions
+        per_model_predictions = {
+            'train': [scalers['y'].inverse_transform(m) for m in per_model_train_means],
+            'val': [scalers['y'].inverse_transform(m) for m in per_model_val_means],
+            'test': [scalers['y'].inverse_transform(m) for m in per_model_test_means],
+            'train_std': [m * scalers['y'].scale_ for m in per_model_train_stds],
+            'val_std': [m * scalers['y'].scale_ for m in per_model_val_stds],
+            'test_std': [m * scalers['y'].scale_ for m in per_model_test_stds]
+        }
+        
+        # Get true values in original scale
+        y_train_true = y_train
+        y_val_true = y_val
+        y_test_true = y_test
+        
+        # Evaluate predictions
+        print("\n" + "=" * 50)
+        print("EVALUATING ENSEMBLE PERFORMANCE")
+        print("=" * 50)
+        
+        train_metrics = evaluate_predictions(y_train_true, y_pred_train_mean, y_pred_train_std, 'Train')
+        val_metrics = evaluate_predictions(y_val_true, y_pred_val_mean, y_pred_val_std, 'Validation')
+        test_metrics = evaluate_predictions(y_test_true, y_pred_test_mean, y_pred_test_std, 'Test')
+        
+        # Create dictionaries for plotting
+        y_true_dict = {
+            'train': y_train_true,
+            'val': y_val_true,
+            'test': y_test_true
+        }
+        
+        y_pred_mean_dict = {
+            'train': y_pred_train_mean,
+            'val': y_pred_val_mean,
+            'test': y_pred_test_mean
+        }
+        
+        y_pred_std_dict = {
+            'train': y_pred_train_std,
+            'val': y_pred_val_std,
+            'test': y_pred_test_std
+        }
+        
+        # Calculate overall metrics
+        print("\nCalculating overall metrics (Train+Val+Test)...")
+        overall_metrics, y_true_all, y_pred_all, y_pred_std_all = evaluate_overall_predictions(
+            y_true_dict, y_pred_mean_dict, y_pred_std_dict
+        )
+        
+        # Plot ensemble regression with uncertainty
+        print("\nCreating ensemble regression plots...")
+        model_names = [f"Model_{i+1}" for i in range(len(models))]
+        plot_ensemble_regression_with_uncertainty(
+            y_true_dict, y_pred_mean_dict, y_pred_std_dict,
+            per_model_predictions, model_names,
+            results_dir, Config, overall_metrics,
+            y_true_all, y_pred_all, y_pred_std_all
+        )
+        
+        # Perform ensemble Sobol sensitivity analysis
+        if SOBOL_AVAILABLE:
+            sobol_results = ensemble_sobol_sensitivity_analysis(
+                models, scalers['X'], scalers['y'], Config.feature_names,
+                X_train, results_dir, n_samples=500
+            )
+            
+            # Create enhanced Sobol visualization if results available
+            if sobol_results:
+                sobol_df = pd.DataFrame(sobol_results)
+                plot_sobol_global_sensitivity_bar(results_dir, Config.feature_names, sobol_df)
+        else:
+            sobol_results = None
+        
+        # Save all predictions
+        predictions_df = pd.DataFrame({
+            'Set': ['Train'] * len(y_train_true) + 
+                   ['Validation'] * len(y_val_true) + 
+                   ['Test'] * len(y_test_true) + 
+                   ['Overall'] * len(y_true_all),
+            'True_Value': np.concatenate([
+                y_train_true.flatten(), 
+                y_val_true.flatten(), 
+                y_test_true.flatten(),
+                y_true_all.flatten() if len(y_true_all) > 0 else []
+            ]),
+            'Predicted_Mean': np.concatenate([
+                y_pred_train_mean.flatten(), 
+                y_pred_val_mean.flatten(), 
+                y_pred_test_mean.flatten(),
+                y_pred_all.flatten() if len(y_pred_all) > 0 else []
+            ]),
+            'Predicted_Std': np.concatenate([
+                y_pred_train_std.flatten(), 
+                y_pred_val_std.flatten(), 
+                y_pred_test_std.flatten(),
+                y_pred_std_all.flatten() if len(y_pred_std_all) > 0 else []
+            ]),
+            'Residual': np.concatenate([
+                (y_train_true - y_pred_train_mean).flatten(),
+                (y_val_true - y_pred_val_mean).flatten(),
+                (y_test_true - y_pred_test_mean).flatten(),
+                (y_true_all - y_pred_all).flatten() if len(y_true_all) > 0 and len(y_pred_all) > 0 else []
+            ])
+        })
+        saver.save_predictions(predictions_df)
+        
+        # Save comprehensive results
+        ensemble_results = {
+            'n_models': len(models),
+            'model_status': model_status,
+            'scaler_status': scaler_status,
+            'train_metrics': {k: float(v) if isinstance(v, (np.float32, np.float64)) else v 
+                            for k, v in train_metrics.items()},
+            'val_metrics': {k: float(v) if isinstance(v, (np.float32, np.float64)) else v 
+                          for k, v in val_metrics.items()},
+            'test_metrics': {k: float(v) if isinstance(v, (np.float32, np.float64)) else v 
+                           for k, v in test_metrics.items()},
+            'overall_metrics': {k: float(v) if isinstance(v, (np.float32, np.float64)) else v 
+                              for k, v in overall_metrics.items()},
+            'split_ratios': {'train': Config.train_ratio, 'val': Config.val_ratio, 'test': Config.test_ratio},
+            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'sobol_available': sobol_results is not None
+        }
+        saver.save_metrics(ensemble_results, 'ensemble_results_summary.json')
+        
+        # Save summary CSV
+        summary_row = {
+            'Model': 'Ensemble',
+            'N_Models': len(models),
+            'Train_MSE': train_metrics.get('mse', np.nan),
+            'Train_R2': train_metrics.get('r2', np.nan),
+            'Train_MAE': train_metrics.get('mae', np.nan),
+            'Train_Uncertainty': train_metrics.get('mean_std', np.nan),
+            'Val_MSE': val_metrics.get('mse', np.nan),
+            'Val_R2': val_metrics.get('r2', np.nan),
+            'Val_MAE': val_metrics.get('mae', np.nan),
+            'Val_Uncertainty': val_metrics.get('mean_std', np.nan),
+            'Test_MSE': test_metrics.get('mse', np.nan),
+            'Test_R2': test_metrics.get('r2', np.nan),
+            'Test_MAE': test_metrics.get('mae', np.nan),
+            'Test_Uncertainty': test_metrics.get('mean_std', np.nan),
+            'Test_Coverage_95': test_metrics.get('coverage_95', np.nan),
+            'Overall_MSE': overall_metrics.get('mse', np.nan),
+            'Overall_R2': overall_metrics.get('r2', np.nan),
+            'Overall_MAE': overall_metrics.get('mae', np.nan),
+            'Overall_Uncertainty': overall_metrics.get('mean_std', np.nan),
+            'Overall_Coverage_95': overall_metrics.get('coverage_95', np.nan)
+        }
+        
+        summary_df = pd.DataFrame([summary_row])
+        summary_df.to_csv(os.path.join(results_dir, 'ensemble_summary.csv'), index=False)
+        
+        # Also save individual model performance for comparison
+        individual_models_summary = []
+        for i in range(len(models)):
+            model_test_preds = per_model_predictions['test'][i]
+            model_test_r2 = r2_score(y_test_true, model_test_preds)
+            model_test_mae = mean_absolute_error(y_test_true, model_test_preds)
+            individual_models_summary.append({
+                'Model': f'Model_{i+1}',
+                'Test_R2': model_test_r2,
+                'Test_MAE': model_test_mae
+            })
+        
+        individual_df = pd.DataFrame(individual_models_summary)
+        individual_df.to_csv(os.path.join(results_dir, 'individual_models_performance.csv'), index=False)
+        
+        # Final summary
+        print("\n" + "=" * 70)
+        print("ENSEMBLE MODEL RESULTS SUMMARY")
+        print("=" * 70)
+        print(f"\nEnsemble Size: {len(models)} models")
+        print(f"\nTest Set Performance:")
+        print(f"  R² = {test_metrics.get('r2', 0):.4f}")
+        print(f"  RMSE = {test_metrics.get('rmse', 0):.4f}")
+        print(f"  MAE = {test_metrics.get('mae', 0):.4f}")
+        print(f"  Mean Uncertainty = {test_metrics.get('mean_std', 0):.4f}")
+        print(f"  95% PI Coverage = {test_metrics.get('coverage_95', 0):.2%}")
+        
+        print(f"\nOverall Performance (Train+Val+Test):")
+        print(f"  R² = {overall_metrics.get('r2', 0):.4f}")
+        print(f"  MAE = {overall_metrics.get('mae', 0):.4f}")
+        print(f"  Mean Uncertainty = {overall_metrics.get('mean_std', 0):.4f}")
+        print(f"  95% PI Coverage = {overall_metrics.get('coverage_95', 0):.2%}")
+        
+        print(f"\nIndividual Model Test R²:")
+        for i, row in individual_df.iterrows():
+            print(f"  {row['Model']}: {row['Test_R2']:.4f}")
+        
+        print(f"\n✓ All results saved in: {results_dir}")
+        print(f"✓ Committee model info: {model_path}")
+        print(f"✓ Complete committee model pickle: {pickle_path}")
+        print(f"✓ Scalers saved: {os.path.join(results_dir, 'scaler_X.pkl')} and {os.path.join(results_dir, 'scaler_y.pkl')}")
+        print("=" * 70)
+        
+    except Exception as e:
+        print(f"\nFATAL ERROR: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return 1
+    
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        exit_code = main()
+        import sys
+        sys.exit(exit_code)
+    except Exception as e:
+        print(f"\nFATAL ERROR: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        import sys
+        sys.exit(1)
